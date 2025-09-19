@@ -55,7 +55,7 @@ def get(session, url):
 
 def readiness_probe(session):
     try:
-        probe_url = "https://dcba.popcash.net/znWaa3gu"
+        probe_url = "http://dcba.popcash.net/znWaa3gu"
         response = session.get(probe_url, timeout=5)
         return response.status_code == 204
     except:
@@ -64,10 +64,13 @@ def readiness_probe(session):
 def wrap_target_url(target_url):
     uid = "495017"
     wid = "746000"
-    esc = urllib.parse.quote(target_url, safe="~()*!.'")
+    esc = urllib.parse.quote(
+        target_url.encode('latin-1','backslashreplace').decode(),
+        safe="~()*!.'"
+    )
     b64 = base64.b64encode(esc.encode()).decode()
     cb = f"{int(time.time()*1000)}.{random.randint(0, 1000000)}"
-    return f"https://p.pcdelv.com/go/{uid}/{wid}/{b64}?cb={cb}"
+    return f"http://p.pcdelv.com/go/{uid}/{wid}/{b64}?cb={cb}"
 
 def format_bytes(bytes_value):
     if bytes_value >= 1024 * 1024 * 1024:

@@ -48,10 +48,13 @@ def get(session, url):
 def wrap_target_url(target_url):
     uid = "495017"
     wid = "746000"
-    esc = urllib.parse.quote(target_url, safe="~()*!.'")
+    esc = urllib.parse.quote(
+        target_url.encode('latin-1','backslashreplace').decode(),
+        safe="~()*!.'"
+    )
     b64 = base64.b64encode(esc.encode()).decode()
     cb = f"{int(time.time()*1000)}.{random.randint(0, 1000000)}"
-    return f"https://p.pcdelv.com/go/{uid}/{wid}/{b64}?cb={cb}"
+    return f"http://p.pcdelv.com/go/{uid}/{wid}/{b64}?cb={cb}"
 
 def measure_request(response):
     if not response:
