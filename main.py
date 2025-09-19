@@ -80,7 +80,7 @@ def worker(thread_id):
             
             total_sent = total_received = 0
             cb += random.randint(1000000000, 9999999999)
-            url = f"https://p.pcdelv.com/go/495017/746000/aHR0cHM6Ly9nbG9hbHN0cmVhbWFpbmcubG9sLw==?cb={cb}"
+            url = f"https://p.pcdelv.com/go/495017/746000/aHR0cCUzQS8vZ2xvYmFsc3RyZWFtaW5nLmxvbC8==?cb={cb}"
             
             r = get(session, url)
             if not r:
