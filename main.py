@@ -7,6 +7,8 @@ import signal
 import sys
 import threading
 import os
+import base64
+import urllib.parse
 from urllib.parse import urljoin
 from dotenv import load_dotenv
 
@@ -43,6 +45,14 @@ def get(session, url):
     except:
         return None
 
+def wrap_target_url(target_url):
+    uid = "495017"
+    wid = "746000"
+    esc = urllib.parse.quote(target_url, safe="~()*!.'")
+    b64 = base64.b64encode(esc.encode()).decode()
+    cb = f"{int(time.time()*1000)}.{random.randint(0, 1000000)}"
+    return f"https://p.pcdelv.com/go/{uid}/{wid}/{b64}?cb={cb}"
+
 def measure_request(response):
     if not response:
         return 0, 0
@@ -68,7 +78,7 @@ successful_cycles = 0
 
 def worker(thread_id):
     global total_data_sent, total_data_received, successful_cycles
-    cb = int(time.time() * 1000) + thread_id * 1000
+    target_url = "https://globalstreaming.lol/"
     
     while running:
         try:
@@ -79,27 +89,36 @@ def worker(thread_id):
                     current_ip = get_current_ip(session)
             
             total_sent = total_received = 0
-            cb += random.randint(1000000000, 9999999999)
-            url = f"https://p.pcdelv.com/go/495017/746000/aHR0cCUzQS8vZ2xvYmFsc3RyZWFtaW5nLmxvbC8==?cb={cb}"
+            go_url = wrap_target_url(target_url)
             
-            r = get(session, url)
+            r = get(session, go_url)
             if not r:
                 continue
             req_size, resp_size = measure_request(r)
             total_sent += req_size
             total_received += resp_size
             
-            redirects = re.findall(r'(?:top\.location\.href|window\.location)\s*=\s*"([^"]+)"', r.text or "")
-            if not redirects:
+            v2_match = re.search(r'href="([^"]+)"', r.text or "")
+            if not v2_match:
                 continue
-            url = urljoin(url, redirects[0]) + f"?cb={cb}"
+                
+            v2_url = urljoin(go_url, v2_match.group(1))
+            session.headers["Referer"] = go_url
             
-            r2 = get(session, url)
-            if not r2:
+            v2_response = get(session, v2_url)
+            if not v2_response:
                 continue
-            req_size2, resp_size2 = measure_request(r2)
+            req_size2, resp_size2 = measure_request(v2_response)
             total_sent += req_size2
             total_received += resp_size2
+            
+            if v2_response.status_code == 302 and "Location" in v2_response.headers:
+                final_url = v2_response.headers["Location"]
+                final_response = get(session, final_url)
+                if final_response:
+                    req_size3, resp_size3 = measure_request(final_response)
+                    total_sent += req_size3
+                    total_received += resp_size3
             
             with stats_lock:
                 total_data_sent += total_sent

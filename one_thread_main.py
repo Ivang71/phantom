@@ -1,20 +1,41 @@
-import requests
+import os
 import re
-import random
 import time
 import json
 import signal
-import sys
-import threading
+import random
+import requests
+import base64
+import urllib.parse
 from urllib.parse import urljoin
+from fake_useragent import UserAgent
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def create_session():
+    ua = UserAgent()
     session = requests.Session()
-    session.proxies = {
-        'http': 'http://spnmwgk1qy:rzc=KO53v2Wp5vitSh@dc.decodo.com:10000',
-        'https': 'http://spnmwgk1qy:rzc=KO53v2Wp5vitSh@dc.decodo.com:10000'
-    }
+    proxy_user = os.getenv('PROXY_USER')
+    proxy_pass = os.getenv('PROXY_PASS')
+    proxy_host = os.getenv('PROXY_HOST')
+    proxy_port = os.getenv('PROXY_PORT')
+    session.headers.update({
+        'User-Agent': ua.random,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
+    })
+    if proxy_user and proxy_pass and proxy_host and proxy_port:
+        proxy_url = f"http://{proxy_user}:{proxy_pass}@{proxy_host}:{proxy_port}"
+        session.proxies = {
+            'http': proxy_url,
+            'https': proxy_url
+        }
     return session
 
 def get_current_ip(session):
@@ -31,6 +52,32 @@ def get(session, url):
         return session.get(url, allow_redirects=False, timeout=5)
     except:
         return None
+
+def readiness_probe(session):
+    try:
+        probe_url = "https://dcba.popcash.net/znWaa3gu"
+        response = session.get(probe_url, timeout=5)
+        return response.status_code == 204
+    except:
+        return False
+
+def wrap_target_url(target_url):
+    uid = "495017"
+    wid = "746000"
+    esc = urllib.parse.quote(target_url, safe="~()*!.'")
+    b64 = base64.b64encode(esc.encode()).decode()
+    cb = f"{int(time.time()*1000)}.{random.randint(0, 1000000)}"
+    return f"https://p.pcdelv.com/go/{uid}/{wid}/{b64}?cb={cb}"
+
+def format_bytes(bytes_value):
+    if bytes_value >= 1024 * 1024 * 1024:
+        return f"{bytes_value / (1024 * 1024 * 1024):.2f}GB"
+    if bytes_value >= 1024 * 1024:
+        return f"{bytes_value / (1024 * 1024):.2f}MB"
+    elif bytes_value >= 1024:
+        return f"{bytes_value / 1024:.2f}KB"
+    else:
+        return f"{bytes_value}B"
 
 def measure_request(response):
     if not response:
@@ -49,7 +96,7 @@ def signal_handler(signum, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
-cb = int(time.time() * 1000)
+target_url = "https://globalstreaming.lol/"
 total_data_sent = 0
 total_data_received = 0
 successful_cycles = 0
@@ -61,37 +108,50 @@ while running:
         current_ip = None
         if successful_cycles < 2:
             current_ip = get_current_ip(session)
-        total_sent = total_received = 0
-        cb += random.randint(1000000000, 9999999999)
-        url = f"https://p.pcdelv.com/go/495017/746000/aHR0cCUzQS8vZ2xvYmFsc3RyZWFtaW5nLmxvbC8?cb={cb}"
         
-        r = get(session, url)
+        if not readiness_probe(session):
+            continue
+        
+        total_sent = total_received = 0
+        go_url = wrap_target_url(target_url)
+        
+        r = get(session, go_url)
         if not r:
             continue
         req_size, resp_size = measure_request(r)
         total_sent += req_size
         total_received += resp_size
         
-        redirects = re.findall(r'(?:top\.location\.href|window\.location)\s*=\s*"([^"]+)"', r.text or "")
-        if not redirects:
+        v2_match = re.search(r'href="([^"]+)"', r.text or "")
+        if not v2_match:
             continue
-        url = urljoin(url, redirects[0]) + f"?cb={cb}"
+            
+        v2_url = urljoin(go_url, v2_match.group(1))
+        session.headers["Referer"] = go_url
         
-        r2 = get(session, url)
-        if not r2:
+        v2_response = get(session, v2_url)
+        if not v2_response:
             continue
-        req_size2, resp_size2 = measure_request(r2)
+        req_size2, resp_size2 = measure_request(v2_response)
         total_sent += req_size2
         total_received += resp_size2
+        
+        if v2_response.status_code == 302 and "Location" in v2_response.headers:
+            final_url = v2_response.headers["Location"]
+            final_response = get(session, final_url)
+            if final_response:
+                req_size3, resp_size3 = measure_request(final_response)
+                total_sent += req_size3
+                total_received += resp_size3
         
         total_data_sent += total_sent
         total_data_received += total_received
         successful_cycles += 1
         
         if current_ip:
-            print(f"Cycle {successful_cycles} [IP: {current_ip}]: Sent {total_sent}b Received {total_received}b | Total: {total_data_sent + total_data_received}b")
+            print(f"Cycle {successful_cycles} [IP: {current_ip}]: Sent {format_bytes(total_sent)} Received {format_bytes(total_received)} | Total: {format_bytes(total_data_sent + total_data_received)}")
         else:
-            print(f"Cycle {successful_cycles}: Sent {total_sent}b Received {total_received}b | Total: {total_data_sent + total_data_received}b")
+            print(f"Cycle {successful_cycles}: Sent {format_bytes(total_sent)} Received {format_bytes(total_received)} | Total: {format_bytes(total_data_sent + total_data_received)}")
     except KeyboardInterrupt:
         print("\nKeyboard interrupt received. Exiting...")
         break
@@ -101,4 +161,4 @@ while running:
     if running:
         time.sleep(0.0)
 
-print(f"Final stats: {successful_cycles} cycles, {total_data_sent + total_data_received}b total")
+print(f"Final stats: {successful_cycles} cycles, {format_bytes(total_data_sent + total_data_received)} total")
