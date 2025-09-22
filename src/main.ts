@@ -92,41 +92,32 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
 
   const page = await context.newPage()
   
-  let hasSeenPcdelv = false
+  // Whitelist of allowed domains and their subdomains
+  const ALLOWED_DOMAINS = ['globalstreaming.lol', 'pcdelv.com', 'popcash.net']
   
-  // Block unnecessary resource types, allow only HTML, JS, and XHR
-  // Also handle caching for specific files and detect navigation away from p.pcdelv.com
+  const isAllowedDomain = (url: string): boolean => {
+    try {
+      const hostname = new URL(url).hostname.toLowerCase()
+      return ALLOWED_DOMAINS.some(domain => 
+        hostname === domain || hostname.endsWith('.' + domain)
+      )
+    } catch {
+      return false
+    }
+  }
+  
+  // Block all domains except whitelisted ones, allow only HTML, JS, and XHR
+  // Also handle caching for specific files
   await page.route('**/*', async (route) => {
     const request = route.request()
     const resourceType = request.resourceType()
     const url = request.url()
     const allowedTypes = ['document', 'script', 'xhr', 'fetch']
     
-    // Track when we see p.pcdelv.com
-    if (url.includes('p.pcdelv.com')) {
-      if (!hasSeenPcdelv) {
-        hasSeenPcdelv = true
-        console.log(`[PCDELV DETECTED] ${url}`)
-      }
-    }
-    
-    // If this is a navigation request leaving p.pcdelv.com domain, terminate immediately
-    if (request.isNavigationRequest() && 
-        hasSeenPcdelv && 
-        !url.includes('p.pcdelv.com') &&
-        !url.includes('globalstreaming.lol') &&
-        !url.includes('popcash.net')) {
-      
-      console.log(`[TERMINATING] Navigation leaving p.pcdelv.com to: ${url}`)
-      isClosing = true
-      
-      // Abort the navigation and close browser immediately
+    // Block any domain not in whitelist
+    if (!isAllowedDomain(url)) {
+      console.log(`[BLOCKED] Non-whitelisted domain: ${url}`)
       await route.abort()
-      setTimeout(async () => {
-        try {
-          await browser.close()
-        } catch (e) {}
-      }, 50)
       return
     }
     
@@ -472,25 +463,24 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
   }
   
 
+  // Wait for p.pcdelv.com page to finish loading, then terminate
   await page.waitForURL(url => {
     const currentUrl = url.toString()
     if (currentUrl !== TARGET_URL) {
-      // Check if URL contains p.pcdelv.com - if so, close immediately
       if (currentUrl.includes('p.pcdelv.com')) {
+        console.log(`[SUCCESS] Reached p.pcdelv.com: ${currentUrl}`)
+        // Terminate after p.pcdelv.com finishes loading
         setTimeout(async () => {
           try {
+            console.log(`[TERMINATING] p.pcdelv.com page loaded, shutting down`)
+            isClosing = true
+            await page.waitForLoadState('networkidle', { timeout: 3000 })
             await browser.close()
           } catch (e) {}
-        }, 1000)
+        }, 2000) // Give it 2 seconds to fully load
         return true
       }
-      // For other URLs, wait a bit then close
-      setTimeout(async () => {
-        try {
-          await page.waitForLoadState('networkidle', { timeout: 5000 })
-          await browser.close()
-        } catch (e) {}
-      }, 2000)
+      console.log(`[SUCCESS] Redirect detected to ${currentUrl}`)
       return true
     }
     return false
