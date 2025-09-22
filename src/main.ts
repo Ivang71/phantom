@@ -1,8 +1,6 @@
-import { chromium
-    
- } from 'playwright-extra'
+import { chromium } from 'playwright-extra'
 import StealthPlugin from 'puppeteer-extra-plugin-stealth'
-import UserAgent from 'user-agents'
+const UserAgent = require('user-agents')
 import { config as loadEnv } from 'dotenv'
 
 chromium.use(StealthPlugin())
@@ -122,7 +120,7 @@ async function main(): Promise<void> {
       if (page.url() !== TARGET_URL) break
     }
     if (page.url() === TARGET_URL) {
-      await browser.close()
+    //   await browser.close()
       return
     }
   }
@@ -192,7 +190,7 @@ async function main(): Promise<void> {
         try {
           await page.waitForLoadState('networkidle', { timeout: 5000 })
         } catch (e) {}
-        await browser.close()
+        // await browser.close()
       }, 2000)
       return true
     }
@@ -204,7 +202,7 @@ async function main(): Promise<void> {
     try {
       await page.waitForLoadState('networkidle', { timeout: 5000 })
     } catch (e) {}
-    await browser.close()
+    // await browser.close()
   })
 }
 
