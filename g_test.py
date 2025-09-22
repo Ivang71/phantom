@@ -9,6 +9,12 @@ UID = "495017"
 WID = "746009"
 TARGET = "https://globalstreaming.lol/"
 
+# Flow summary:
+# 1.   GET main site         → sets PopCash context (not strictly needed)
+# 2.   GET /go               → 200 (inline JS)  *or* 303→200 (cookie gate)
+# 3.   Extract /v2/.../cl    → same-origin GET → 302 to advertiser
+# 4.   Stop here (bandwidth saved)
+
 # Navigation headers that make PCDelv treat this as a real browser navigation
 NAV_HEADERS = {
     # -- the five that flip PCDelv into "navigation" mode --
@@ -29,6 +35,10 @@ NAV_HEADERS = {
     # rnet already adds Accept-Encoding, Host and User-Agent for you.
 }
 
+# Pre-built header variations
+CROSS_SITE = {**NAV_HEADERS}
+SAME_ORIGIN = {**NAV_HEADERS, 'Sec-Fetch-Site': 'same-origin'}
+
 def js_escape(url: str) -> str:
     out = []
     for ch in url:
@@ -44,25 +54,13 @@ def js_escape(url: str) -> str:
 def wrap_url(target: str) -> str:
     esc = js_escape(target)
     b64 = base64.b64encode(esc.encode()).decode()
-    cb  = f"{int(time.time()*1000)}.{random.randint(0,1_000_000)}"
+    cb  = f"{int(time.time()*1000)}.{random.randint(0,999999):06d}"
     return f"https://p.pcdelv.com/go/{UID}/{WID}/{b64}?cb={cb}"  # Start with HTTPS
 
 async def main():
     # --- Rnet client with Chrome137 JA3 / ALPN ---
-    proxy_user = os.getenv('PROXY_USER')
-    proxy_pass = os.getenv('PROXY_PASS')
-    proxy_host = os.getenv('PROXY_HOST')
-    proxy_port = os.getenv('PROXY_PORT')
-    
-    proxy_url = None
-    if proxy_user and proxy_pass and proxy_host and proxy_port:
-        proxy_url = f"http://{proxy_user}:{proxy_pass}@{proxy_host}:{proxy_port}"
-        print(f"   Using proxy: {proxy_host}:{proxy_port}")
-    else:
-        print("   No proxy configured")
-    
     # Use desktop fingerprinting only
-    c = Client(impersonate=Impersonate.Chrome137, proxy=proxy_url)
+    c = Client(impersonate=Impersonate.Chrome137, proxy=os.getenv('PROXY'))
     print("   Using Chrome137 desktop fingerprint")
 
     # 1  load globalstreaming.lol, popcash script sends empty XHR
@@ -82,6 +80,8 @@ async def main():
     go_url = wrap_url(TARGET)  # start with HTTPS (HSTS preload behavior)
     print(f"4. GET /go: {go_url}")
     
+    print("   Waiting for 2 seconds...")
+    time.sleep(2)
     r_go = await c.get(go_url, headers=NAV_HEADERS, allow_redirects=False)
     print(f"   go() status: {r_go.status_code} → {r_go.headers.get('Location')}")
     
@@ -115,17 +115,16 @@ async def main():
     if need_redirect_follow:
         print("5. Following redirect chain...")
         current_url = https_url
-        max_redirects = 5
         redirect_count = 0
         
-        while redirect_count < max_redirects:
+        while redirect_count < 2:  # Reduced max redirects for faster failure
             # Update headers for each hop
-            cross_site_headers = {**NAV_HEADERS, "Referer": go_url}
+            cross_site_headers = {**CROSS_SITE, "Referer": go_url}
             r_js = await c.get(current_url, headers=cross_site_headers, allow_redirects=False)
             print(f"   Hop {redirect_count + 1}: {r_js.status_code} from {current_url}")
             
             # Read the body once so rnet commits Set-Cookie
-            _ = await r_js.text()
+            await r_js.read()
             
             if 300 <= int(str(r_js.status_code)) < 400:
                 # Another redirect
@@ -133,12 +132,6 @@ async def main():
                 if isinstance(next_location, bytes):
                     next_location = next_location.decode('utf-8')
                 print(f"     → Redirects to: {next_location}")
-                
-                if next_location == current_url:
-                    # same-URL redirect: cookie challenge just satisfied → try again
-                    print(f"     Same-URL redirect: cookie challenge satisfied")
-                    redirect_count += 1
-                    continue
                     
                 current_url = next_location
                 redirect_count += 1
@@ -146,7 +139,7 @@ async def main():
                 # Got final content
                 break
         
-        if redirect_count >= max_redirects:
+        if redirect_count >= 2:
             print("   ⚠️ Too many redirects, stopping")
             return
         
@@ -175,20 +168,29 @@ async def main():
     print(f"6. Making request to /cl: {cl_url}")
     
     # Second hop: same-origin, so flip Sec-Fetch-Site
-    SAME_ORIGIN = {**NAV_HEADERS, "Sec-Fetch-Site": "same-origin", "Referer": https_url}
-    r_cl = await c.get(cl_url, headers=SAME_ORIGIN, allow_redirects=False)
-    print(f"   cl() status: {r_cl.status_code} → {r_cl.headers.get('Location')}")
+    same_origin_headers = {**SAME_ORIGIN, "Referer": https_url}
+    r_cl = await c.get(cl_url, headers=same_origin_headers, allow_redirects=False)
+    print(f"   cl() status: {r_cl.status_code} → {r_cl.headers.get('Location')[:70]}")
+    
+    # Check Content-Length before reading body
+    content_length_header = r_cl.headers.get('Content-Length', b'0')
+    if isinstance(content_length_header, bytes):
+        content_length_header = content_length_header.decode('utf-8')
+    content_length = int(content_length_header)
+    if content_length > 50_000:
+        print("Landing page too large – aborting")
+        return
 
     # 7  skip advertiser redirect to save bandwidth
     location = r_cl.headers.get('Location')
     if isinstance(location, bytes):
         location = location.decode('utf-8')
     if int(str(r_cl.status_code)) in [301, 302, 303, 307, 308] and location:
-        print(f"   Would redirect to: {location}")
-        print("   Skipping advertiser redirect to save bandwidth")
+        print(f"   Would redirect to: {location[:70]}")
     else:
         print(f"   Unexpected response: {r_cl.status_code}")
     
-    print("Flow completed successfully!")
+    print("Flow completed")
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
