@@ -2,6 +2,7 @@ import { chromium } from 'playwright-extra'
 import StealthPlugin from 'puppeteer-extra-plugin-stealth'
 const UserAgent = require('user-agents')
 import { config as loadEnv } from 'dotenv'
+import * as os from 'os'
 
 chromium.use(StealthPlugin())
 loadEnv()
@@ -14,7 +15,49 @@ const MAX_ITERATIONS = 10
 
 const TARGET_URL = 'https://globalstreaming.lol/'
 
-async function visitSite(proxyPort: number): Promise<void> {
+function getMemoryUsage() {
+  const used = process.memoryUsage()
+  return {
+    rss: Math.round(used.rss / 1024 / 1024 * 100) / 100, // MB
+    heapTotal: Math.round(used.heapTotal / 1024 / 1024 * 100) / 100, // MB
+    heapUsed: Math.round(used.heapUsed / 1024 / 1024 * 100) / 100, // MB
+    external: Math.round(used.external / 1024 / 1024 * 100) / 100 // MB
+  }
+}
+
+function getCpuUsage() {
+  const cpus = os.cpus()
+  let user = 0, nice = 0, sys = 0, idle = 0, irq = 0
+  
+  for (const cpu of cpus) {
+    user += cpu.times.user
+    nice += cpu.times.nice
+    sys += cpu.times.sys
+    idle += cpu.times.idle
+    irq += cpu.times.irq
+  }
+  
+  const total = user + nice + sys + idle + irq
+  return {
+    user: Math.round((user / total) * 100 * 100) / 100,
+    system: Math.round((sys / total) * 100 * 100) / 100,
+    idle: Math.round((idle / total) * 100 * 100) / 100,
+    usage: Math.round(((total - idle) / total) * 100 * 100) / 100
+  }
+}
+
+function getSystemInfo() {
+  return {
+    platform: os.platform(),
+    arch: os.arch(),
+    totalMemory: Math.round(os.totalmem() / 1024 / 1024 / 1024 * 100) / 100, // GB
+    freeMemory: Math.round(os.freemem() / 1024 / 1024 / 1024 * 100) / 100, // GB
+    cpuCount: os.cpus().length,
+    loadAvg: os.loadavg().map(load => Math.round(load * 100) / 100)
+  }
+}
+
+async function createBrowserWithProxy(proxyPort: number) {
   let proxyConfig: any = undefined
   if (PROXY_HOST && proxyPort) {
     proxyConfig = {
@@ -25,11 +68,25 @@ async function visitSite(proxyPort: number): Promise<void> {
       })
     }
   }
-  const browser = await chromium.launch({
+  
+  return await chromium.launch({
     headless: false, // dev only
-    args: ['--no-first-run', '--disable-blink-features=AutomationControlled'],
+    args: [
+      '--no-first-run', 
+      '--disable-blink-features=AutomationControlled',
+      '--fast-start',
+      '--disable-extensions',
+      '--disable-default-apps',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding'
+    ],
     ...(proxyConfig && { proxy: proxyConfig })
   })
+}
+
+async function visitSite(proxyPort: number): Promise<void> {
+  const browser = await createBrowserWithProxy(proxyPort)
 
   const userAgent = new UserAgent({ deviceCategory: 'desktop' })
   const context = await browser.newContext({
@@ -264,20 +321,53 @@ async function visitSite(proxyPort: number): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  console.log('=== System Information ===')
+  const sysInfo = getSystemInfo()
+  console.log(`Platform: ${sysInfo.platform} ${sysInfo.arch}`)
+  console.log(`CPU Cores: ${sysInfo.cpuCount}`)
+  console.log(`Total Memory: ${sysInfo.totalMemory} GB`)
+  console.log(`Free Memory: ${sysInfo.freeMemory} GB`)
+  console.log(`Load Average: [${sysInfo.loadAvg.join(', ')}]`)
+  console.log('==============================\n')
+
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const currentProxyPort = PROXY_PORT_START + i
-    console.log(`Iteration ${i + 1}/${MAX_ITERATIONS} - Using proxy port: ${currentProxyPort}`)
+    console.log(`\n🚀 Iteration ${i + 1}/${MAX_ITERATIONS} - Proxy port: ${currentProxyPort}`)
+    
+    const memBefore = getMemoryUsage()
+    const cpuBefore = getCpuUsage()
+    const startTime = Date.now()
     
     try {
       await visitSite(currentProxyPort)
+      const duration = Date.now() - startTime
+      const memAfter = getMemoryUsage()
+      const cpuAfter = getCpuUsage()
+      
+      console.log(`✅ Iteration ${i + 1} completed in ${duration}ms`)
+      console.log(`📊 Memory: RSS ${memAfter.rss}MB (Δ${(memAfter.rss - memBefore.rss).toFixed(1)}MB), Heap ${memAfter.heapUsed}MB`)
+      console.log(`🖥️  CPU: ${cpuAfter.usage}% usage, Load: [${os.loadavg().map(l => l.toFixed(2)).join(', ')}]`)
+      console.log(`💾 System Memory: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(2)}GB free`)
+      
     } catch (error) {
-      console.error(`Error in iteration ${i + 1}:`, error)
+      console.error(`❌ Error in iteration ${i + 1}:`, error)
+      const memAfter = getMemoryUsage()
+      console.log(`📊 Memory after error: RSS ${memAfter.rss}MB, Heap ${memAfter.heapUsed}MB`)
     }
     
+    // Shorter delay between iterations for efficiency
     if (i < MAX_ITERATIONS - 1) {
-      await new Promise(resolve => setTimeout(resolve, 2000))
+      console.log(`⏳ Waiting 1s before next iteration...`)
+      await new Promise(resolve => setTimeout(resolve, 1000))
     }
   }
+  
+  console.log('\n🏁 All iterations completed!')
+  const finalMem = getMemoryUsage()
+  const finalCpu = getCpuUsage()
+  console.log(`📊 Final Memory: RSS ${finalMem.rss}MB, Heap ${finalMem.heapUsed}MB`)
+  console.log(`🖥️  Final CPU: ${finalCpu.usage}% usage`)
+  console.log(`💾 Final System Memory: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(2)}GB free`)
 }
 
 main().catch(err => {
