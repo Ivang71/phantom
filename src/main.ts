@@ -486,36 +486,8 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
   }
   
 
-  // Wait for p.pcdelv.com page to finish loading, then terminate
-  await page.waitForURL(url => {
-    const currentUrl = url.toString()
-    if (currentUrl !== TARGET_URL) {
-      if (currentUrl.includes('p.pcdelv.com')) {
-        console.log(`[SUCCESS] Reached p.pcdelv.com: ${currentUrl}`)
-        // Terminate after p.pcdelv.com finishes loading
-        setTimeout(async () => {
-          try {
-            console.log(`[TERMINATING] p.pcdelv.com page loaded, shutting down`)
-            isClosing = true
-            await page.waitForLoadState('networkidle', { timeout: 3000 })
-            await browser.close()
-          } catch (e) {}
-        }, 2000) // Give it 2 seconds to fully load
-        return true
-      }
-      console.log(`[SUCCESS] Redirect detected to ${currentUrl}`)
-      return true
-    }
-    return false
-  }, {
-    waitUntil: 'commit',
-    timeout: 30000
-  }).catch(async () => {
-    try {
-      await page.waitForLoadState('networkidle', { timeout: 5000 })
-      await browser.close()
-    } catch (e) {}
-  })
+  // Proceed straight to clicking without waiting
+  console.log(`[PROCEEDING] Going straight to click actions without waiting for popup`)
   
 
   
