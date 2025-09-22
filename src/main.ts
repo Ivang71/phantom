@@ -1,12 +1,9 @@
 import { chromium } from 'playwright-extra'
-import StealthPlugin from 'puppeteer-extra-plugin-stealth'
+// Removed stealth plugin - causing too many errors with page creation
 const UserAgent = require('user-agents')
 import { config as loadEnv } from 'dotenv'
 import * as os from 'os'
 
-// Configure stealth plugin with error handling
-const stealthPlugin = StealthPlugin()
-chromium.use(stealthPlugin)
 loadEnv()
 
 const PROXY_USER = process.env.PROXY_USER
@@ -18,6 +15,13 @@ const MAX_ITERATIONS = 1000000000
 
 const TARGET_URL = 'https://globalstreaming.lol/'
 
+// Cache for frequently requested files
+const fileCache = new Map<string, { content: Buffer, contentType: string }>()
+const CACHED_FILES = [
+  'https://cdn.popcash.net/show.js',
+  'https://globalstreaming.lol/'
+]
+
 function getMemoryUsage() {
   const used = process.memoryUsage()
   return {
@@ -28,26 +32,6 @@ function getMemoryUsage() {
   }
 }
 
-function getCpuUsage() {
-  const cpus = os.cpus()
-  let user = 0, nice = 0, sys = 0, idle = 0, irq = 0
-  
-  for (const cpu of cpus) {
-    user += cpu.times.user
-    nice += cpu.times.nice
-    sys += cpu.times.sys
-    idle += cpu.times.idle
-    irq += cpu.times.irq
-  }
-  
-  const total = user + nice + sys + idle + irq
-  return {
-    user: Math.round((user / total) * 100 * 100) / 100,
-    system: Math.round((sys / total) * 100 * 100) / 100,
-    idle: Math.round((idle / total) * 100 * 100) / 100,
-    usage: Math.round(((total - idle) / total) * 100 * 100) / 100
-  }
-}
 
 function getSystemInfo() {
   return {
@@ -55,8 +39,7 @@ function getSystemInfo() {
     arch: os.arch(),
     totalMemory: Math.round(os.totalmem() / 1024 / 1024 / 1024 * 100) / 100, // GB
     freeMemory: Math.round(os.freemem() / 1024 / 1024 / 1024 * 100) / 100, // GB
-    cpuCount: os.cpus().length,
-    loadAvg: os.loadavg().map(load => Math.round(load * 100) / 100)
+    cpuCount: os.cpus().length
   }
 }
 
@@ -82,7 +65,11 @@ async function createBrowserWithProxy(proxyPort: number) {
       '--disable-default-apps',
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
-      '--disable-renderer-backgrounding'
+      '--disable-renderer-backgrounding',
+      '--disable-web-security',
+      '--disable-features=VizDisplayCompositor',
+      '--no-sandbox',
+      '--disable-setuid-sandbox'
     ],
     ...(proxyConfig && { proxy: proxyConfig })
   })
@@ -92,6 +79,7 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
   const browser = await createBrowserWithProxy(proxyPort)
   let totalBytesSent = 0
   let totalBytesReceived = 0
+  let isClosing = false
 
   const userAgent = new UserAgent({ deviceCategory: 'desktop' })
   const context = await browser.newContext({
@@ -104,24 +92,128 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
 
   const page = await context.newPage()
   
+  let hasSeenPcdelv = false
+  
+  // Block unnecessary resource types, allow only HTML, JS, and XHR
+  // Also handle caching for specific files and detect navigation away from p.pcdelv.com
+  await page.route('**/*', async (route) => {
+    const request = route.request()
+    const resourceType = request.resourceType()
+    const url = request.url()
+    const allowedTypes = ['document', 'script', 'xhr', 'fetch']
+    
+    // Track when we see p.pcdelv.com
+    if (url.includes('p.pcdelv.com')) {
+      if (!hasSeenPcdelv) {
+        hasSeenPcdelv = true
+        console.log(`[PCDELV DETECTED] ${url}`)
+      }
+    }
+    
+    // If this is a navigation request leaving p.pcdelv.com domain, terminate immediately
+    if (request.isNavigationRequest() && 
+        hasSeenPcdelv && 
+        !url.includes('p.pcdelv.com') &&
+        !url.includes('globalstreaming.lol') &&
+        !url.includes('popcash.net')) {
+      
+      console.log(`[TERMINATING] Navigation leaving p.pcdelv.com to: ${url}`)
+      isClosing = true
+      
+      // Abort the navigation and close browser immediately
+      await route.abort()
+      setTimeout(async () => {
+        try {
+          await browser.close()
+        } catch (e) {}
+      }, 50)
+      return
+    }
+    
+    if (!allowedTypes.includes(resourceType)) {
+      route.abort()
+      return
+    }
+    
+    // Check if this file should be cached
+    if (CACHED_FILES.includes(url)) {
+      if (fileCache.has(url)) {
+        // Serve from cache
+        const cached = fileCache.get(url)!
+        console.log(`[CACHE HIT] Serving ${url} from cache (${formatBytes(cached.content.length)})`)
+        await route.fulfill({
+          status: 200,
+          contentType: cached.contentType,
+          body: cached.content
+        })
+        return
+      } else {
+        // First time - fetch and cache
+        console.log(`[CACHE MISS] Fetching ${url} for caching`)
+      }
+    }
+    
+    route.continue()
+  })
+  
   // Track network requests for data measurement
   page.on('request', (request) => {
-    const postData = request.postData()
-    if (postData) {
-      totalBytesSent += Buffer.byteLength(postData, 'utf8')
+    const resourceType = request.resourceType()
+    const allowedTypes = ['document', 'script', 'xhr', 'fetch']
+    
+    // Only count allowed requests
+    if (allowedTypes.includes(resourceType)) {
+      const url = request.url()
+      const method = request.method()
+      const postData = request.postData()
+      const urlSize = Buffer.byteLength(request.url(), 'utf8')
+      const postSize = postData ? Buffer.byteLength(postData, 'utf8') : 0
+      const headerSize = 200 // estimate
+      const totalSent = urlSize + postSize + headerSize
+      
+      console.log(`[REQUEST] ${resourceType.toUpperCase()} ${method} ${url}`)
+      if (postData) {
+        console.log(`  POST Data: ${formatBytes(postSize)}`)
+      }
+      console.log(`  URL: ${formatBytes(urlSize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSent)}`)
+      
+      totalBytesSent += totalSent
     }
-    // Estimate header size
-    totalBytesSent += Buffer.byteLength(request.url(), 'utf8') + 200 // rough estimate for headers
   })
   
   page.on('response', async (response) => {
+    if (isClosing) return // Skip processing if browser is closing
+    
     try {
-      const body = await response.body()
-      totalBytesReceived += body.length
-      // Add headers size estimate
-      totalBytesReceived += 500 // rough estimate for response headers
+      const resourceType = response.request().resourceType()
+      const allowedTypes = ['document', 'script', 'xhr', 'fetch']
+      
+      // Only count allowed responses
+      if (allowedTypes.includes(resourceType)) {
+        const body = await response.body()
+        const url = response.url()
+        const status = response.status()
+        const contentType = response.headers()['content-type'] || 'unknown'
+        const bodySize = body.length
+        const headerSize = 500 // estimate
+        const totalSize = bodySize + headerSize
+        
+        // Cache the file if it's in our cache list
+        if (CACHED_FILES.includes(url) && !fileCache.has(url) && status === 200) {
+          fileCache.set(url, { content: body, contentType })
+          console.log(`[CACHED] Stored ${url} in cache (${formatBytes(bodySize)})`)
+        }
+        
+        console.log(`[RESPONSE] ${resourceType.toUpperCase()} ${status} ${url}`)
+        console.log(`  Content-Type: ${contentType}`)
+        console.log(`  Body: ${formatBytes(bodySize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSize)}`)
+        
+        totalBytesReceived += totalSize
+      }
     } catch (e) {
-      // Response might be already consumed or unavailable
+      if (!isClosing) {
+        console.log(`[RESPONSE ERROR] ${response.url()}: ${e instanceof Error ? e.message : String(e)}`)
+      }
     }
   })
   
@@ -136,10 +228,29 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
   })
   
   await page.addInitScript(() => {
+    // Remove automation indicators
     delete (window as any).navigator.webdriver
-    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-    (window as any).chrome = { runtime: {} };
+    delete (window as any).navigator.__proto__.webdriver
+    
+    // Override navigator properties
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
+    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] })
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] })
+    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 })
+    
+    // Add chrome runtime
+    ;(window as any).chrome = { runtime: {}, loadTimes: () => ({}), csi: () => ({}) }
+    
+    // Override permissions
+    try {
+      const originalQuery = window.navigator.permissions.query
+      window.navigator.permissions.query = (parameters: any) => {
+        if (parameters.name === 'notifications') {
+          return Promise.resolve({ state: Notification.permission } as any)
+        }
+        return originalQuery(parameters)
+      }
+    } catch (e) {}
   })
   
   page.setDefaultTimeout(30000)
@@ -149,6 +260,24 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
   await page.waitForTimeout(3000)
   
   if (page.isClosed()) return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
+
+  // Force trigger PopCash events in case content is cached
+  try {
+    await page.evaluate(() => {
+      // Trigger common popup events
+      window.dispatchEvent(new Event('load'))
+      window.dispatchEvent(new Event('DOMContentLoaded'))
+      document.dispatchEvent(new Event('readystatechange'))
+      
+      // Try to trigger PopCash if it exists
+      if (typeof (window as any).popunder !== 'undefined') {
+        try { (window as any).popunder() } catch(e) {}
+      }
+      if (typeof (window as any).popcash !== 'undefined') {
+        try { (window as any).popcash() } catch(e) {}
+      }
+    })
+  } catch (e) {}
 
   let targetDiv = null
   try {
@@ -172,13 +301,18 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
       () => page.mouse.wheel(0, 100),
       () => page.keyboard.press('Space'),
       () => page.hover('a[href="/"]'),
-      () => page.evaluate(() => window.scrollTo(0, 100))
+      () => page.evaluate(() => window.scrollTo(0, 100)),
+      () => page.mouse.click(100, 100),
+      () => page.mouse.click(800, 400),
+      () => page.keyboard.press('Tab'),
+      () => page.evaluate(() => window.dispatchEvent(new Event('scroll')))
     ]
     
-    for (let attempt = 0; attempt < 10; attempt++) {
+    // More attempts with longer waits for cached content
+    for (let attempt = 0; attempt < 15; attempt++) {
       const action = triggerActions[attempt % triggerActions.length]
       try { await action() } catch (e) {}
-      await page.waitForTimeout(2000)
+      await page.waitForTimeout(3000) // Longer wait for cached content
       
       try {
         const newDivs = await page.$$('div')
@@ -204,10 +338,8 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
     }
     if (page.url() === TARGET_URL) {
       try {
-        const contexts = browser.contexts()
-        for (const context of contexts) {
-          await context.close()
-        }
+        await page.close()
+        await context.close()
         await browser.close()
       } catch (e) {}
       return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
@@ -242,11 +374,17 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
       const currentUrl = page.url()
       if (currentUrl !== TARGET_URL) {
         if (currentUrl.includes('p.pcdelv.com')) {
+          isClosing = true // Set flag to stop processing responses
+          console.log(`[SUCCESS] Redirect detected to ${currentUrl}`)
+          // Wait for redirect chain to complete
           try {
-            const contexts = browser.contexts()
-            for (const context of contexts) {
-              await context.close()
-            }
+            await page.waitForLoadState('networkidle', { timeout: 5000 })
+          } catch (e) {}
+          
+          // Close cleanly
+          try {
+            await page.close()
+            await context.close()
             await browser.close()
           } catch (e) {}
           return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
@@ -278,11 +416,17 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
       const urlAfterEvaluate = page.url()
       if (urlAfterEvaluate !== TARGET_URL) {
         if (urlAfterEvaluate.includes('p.pcdelv.com')) {
+          isClosing = true // Set flag to stop processing responses
+          console.log(`[SUCCESS] Redirect detected to ${urlAfterEvaluate}`)
+          // Wait for redirect chain to complete
           try {
-            const contexts = browser.contexts()
-            for (const context of contexts) {
-              await context.close()
-            }
+            await page.waitForLoadState('networkidle', { timeout: 5000 })
+          } catch (e) {}
+          
+          // Close cleanly
+          try {
+            await page.close()
+            await context.close()
             await browser.close()
           } catch (e) {}
           return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
@@ -327,6 +471,7 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
     } catch (e) {}
   }
   
+
   await page.waitForURL(url => {
     const currentUrl = url.toString()
     if (currentUrl !== TARGET_URL) {
@@ -358,7 +503,9 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
       await browser.close()
     } catch (e) {}
   })
+  
 
+  
   try {
     // Close all pages first to prevent stealth plugin errors
     const contexts = browser.contexts()
@@ -396,7 +543,7 @@ async function main(): Promise<void> {
   console.log(`CPU Cores: ${sysInfo.cpuCount}`)
   console.log(`Total Memory: ${sysInfo.totalMemory} GB`)
   console.log(`Free Memory: ${sysInfo.freeMemory} GB`)
-  console.log(`Load Average: [${sysInfo.loadAvg.join(', ')}]`)
+  console.log(`Cached Files: ${CACHED_FILES.length} files configured for caching`)
   console.log('==============================\n')
 
   let totalBytesSent = 0
@@ -407,21 +554,18 @@ async function main(): Promise<void> {
     console.log(`\nIteration ${i + 1}/${MAX_ITERATIONS} - Proxy port: ${currentProxyPort}`)
     
     const memBefore = getMemoryUsage()
-    const cpuBefore = getCpuUsage()
     const startTime = Date.now()
     
     try {
       const networkData = await visitSite(currentProxyPort)
       const duration = Date.now() - startTime
       const memAfter = getMemoryUsage()
-      const cpuAfter = getCpuUsage()
       
       totalBytesSent += networkData.bytesSent
       totalBytesReceived += networkData.bytesReceived
       
       console.log(`Iteration ${i + 1} completed in ${duration}ms`)
       console.log(`Memory: RSS ${memAfter.rss}MB (Delta ${(memAfter.rss - memBefore.rss).toFixed(1)}MB), Heap ${memAfter.heapUsed}MB`)
-      console.log(`CPU: ${cpuAfter.usage}% usage, Load: [${os.loadavg().map(l => l.toFixed(2)).join(', ')}]`)
       console.log(`System Memory: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(2)}GB free`)
       console.log(`Network: Sent ${formatBytes(networkData.bytesSent)}, Received ${formatBytes(networkData.bytesReceived)}`)
       console.log(`Total Network: Sent ${formatBytes(totalBytesSent)}, Received ${formatBytes(totalBytesReceived)}`)
@@ -441,11 +585,21 @@ async function main(): Promise<void> {
   
   console.log('\nAll iterations completed!')
   const finalMem = getMemoryUsage()
-  const finalCpu = getCpuUsage()
   console.log(`Final Memory: RSS ${finalMem.rss}MB, Heap ${finalMem.heapUsed}MB`)
-  console.log(`Final CPU: ${finalCpu.usage}% usage`)
   console.log(`Final System Memory: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(2)}GB free`)
   console.log(`Final Total Network: Sent ${formatBytes(totalBytesSent)}, Received ${formatBytes(totalBytesReceived)}`)
+  
+  // Show cache statistics
+  console.log('\n=== Cache Statistics ===')
+  console.log(`Cached Files: ${fileCache.size}`)
+  let totalCacheSize = 0
+  for (const [url, cached] of fileCache.entries()) {
+    const size = cached.content.length
+    totalCacheSize += size
+    console.log(`  ${url}: ${formatBytes(size)}`)
+  }
+  console.log(`Total Cache Size: ${formatBytes(totalCacheSize)}`)
+  console.log('=========================')
 }
 
 main().catch(err => {
