@@ -76,12 +76,6 @@ def wrap_target_url(target_url):
     cb = f"{int(time.time()*1000)}.{random.randint(0, 1000000)}"
     return f"http://p.pcdelv.com/go/{uid}/{wid}/{b64}?cb={cb}"
 
-def build_vi_url(v2_path: str, go_url: str) -> str:
-    base = v2_path.rsplit('/', 1)[0]
-    cb = f"{int(time.time()*1000)}.{random.randint(0,1_000_000)}"
-    qs = f"cb={cb}&sw=1366&sh=768&tz=-120"
-    https_base = "https://p.pcdelv.com"
-    return f"{https_base}{base}/vi?{qs}"
 
 def format_bytes(bytes_value):
     if bytes_value >= 1024 * 1024 * 1024:
@@ -141,53 +135,42 @@ async def main():
             total_sent += req_size
             total_received += resp_size
             
-            go_url_https = go_url
-            if r.status_code in (301, 302, 303, 307, 308) and "Location" in r.headers:
+            https_response = r
+            
+            status = int(str(r.status_code))
+            
+            if status in (301, 302, 303, 307, 308) and "Location" in r.headers:
                 go_url_https = r.headers["Location"]
-                print(f"Following redirect to: {go_url_https}")
-                r = await get(client, go_url_https)
-                if not r or r.status_code != 200:
-                    print(f"HTTPS redirect failed: {r.status_code if r else 'None'}")
+                https_response = await get(client, go_url_https)
+                if not https_response or int(str(https_response.status_code)) != 200:
                     continue
-                req_size_https, resp_size_https = measure_request(r)
+                
+                req_size_https, resp_size_https = measure_request(https_response)
                 total_sent += req_size_https
                 total_received += resp_size_https
-            
-            text_content = await r.text()
-            print(f"HTML content length: {len(text_content) if text_content else 0}")
-            v2_match = re.search(r'href="([^"]+)"', text_content or "")
-            if not v2_match:
-                print("No v2 URL found in HTML content")
-                continue
-            print(f"Found v2 path: {v2_match.group(1)}")
-                
-            v2_path = v2_match.group(1)
-            
-            vi_url = build_vi_url(v2_path, go_url_https)
-            print(f"VI URL: {vi_url}")
-            client.headers["Referer"] = go_url_https
-            vi_resp = await get(client, vi_url)
-            if vi_resp and vi_resp.status_code == 200:
-                print(f"VI request successful: {vi_resp.status_code}")
-                req_size_vi, resp_size_vi = measure_request(vi_resp)
-                total_sent += req_size_vi
-                total_received += resp_size_vi
+            elif status == 200:
+                go_url_https = go_url
             else:
-                print(f"VI request failed: {vi_resp.status_code if vi_resp else 'None'} - continuing anyway")
-                # Continue anyway to test CL functionality
+                continue
             
+            text_content = await https_response.text()
+            v2_match = re.search(r'top\.location\.href\s*=\s*["\']([^"\']+)["\']', text_content or "")
+            if not v2_match:
+                v2_match = re.search(r'href\s*=\s*["\']([^"\']*v2[^"\']*)["\']', text_content or "")
+            if not v2_match:
+                continue
+            
+            v2_path = v2_match.group(1)
             cl_url = f"https://p.pcdelv.com{v2_path}"
-            print(f"CL URL: {cl_url}")
+            client.headers["Referer"] = go_url_https
             v2_response = await get(client, cl_url)
             if not v2_response:
-                print("CL request failed: None")
                 continue
-            print(f"CL request successful: {v2_response.status_code}")
             req_size2, resp_size2 = measure_request(v2_response)
             total_sent += req_size2
             total_received += resp_size2
             
-            if v2_response.status_code == 302 and "Location" in v2_response.headers:
+            if int(str(v2_response.status_code)) == 302 and "Location" in v2_response.headers:
                 final_url = v2_response.headers["Location"]
                 final_response = await get(client, final_url)
                 if final_response:
@@ -210,7 +193,7 @@ async def main():
             print("Error ", e)
 
         if running:
-            await asyncio.sleep(0.0)
+            await asyncio.sleep(random.uniform(2, 4))
 
     print(f"Final stats: {successful_cycles} cycles, {format_bytes(total_data_sent + total_data_received)} total")
 
