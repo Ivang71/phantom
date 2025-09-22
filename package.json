@@ -9,11 +9,15 @@
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
+    "@types/user-agents": "^1.0.4",
     "playwright": "^1.55.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.2"
   },
   "dependencies": {
-    "dotenv": "^17.2.2"
+    "dotenv": "^17.2.2",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "user-agents": "^1.1.664"
   }
 }
