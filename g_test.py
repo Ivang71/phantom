@@ -1,6 +1,9 @@
 import asyncio, os, re, time, random, base64, urllib.parse
 from urllib.parse import urljoin
 from rnet import Client, Impersonate                # pip install rnet
+from dotenv import load_dotenv
+
+load_dotenv()
 
 UID = "495017"
 WID = "746009"
@@ -46,9 +49,20 @@ def wrap_url(target: str) -> str:
 
 async def main():
     # --- Rnet client with Chrome137 JA3 / ALPN ---
-    proxy = os.getenv("PROXY")                      # "http://user:pass@host:port"
+    proxy_user = os.getenv('PROXY_USER')
+    proxy_pass = os.getenv('PROXY_PASS')
+    proxy_host = os.getenv('PROXY_HOST')
+    proxy_port = os.getenv('PROXY_PORT')
+    
+    proxy_url = None
+    if proxy_user and proxy_pass and proxy_host and proxy_port:
+        proxy_url = f"http://{proxy_user}:{proxy_pass}@{proxy_host}:{proxy_port}"
+        print(f"   Using proxy: {proxy_host}:{proxy_port}")
+    else:
+        print("   No proxy configured")
+    
     # Use desktop fingerprinting only
-    c = Client(impersonate=Impersonate.Chrome137, proxy=proxy)
+    c = Client(impersonate=Impersonate.Chrome137, proxy=proxy_url)
     print("   Using Chrome137 desktop fingerprint")
 
     # 1  load globalstreaming.lol, popcash script sends empty XHR
