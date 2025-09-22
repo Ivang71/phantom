@@ -4,61 +4,65 @@ import time
 import json
 import signal
 import random
-import requests
 import base64
 import urllib.parse
+import asyncio
 from urllib.parse import urljoin
-from fake_useragent import UserAgent
+from rnet import Client, Impersonate, StatusCode
 from dotenv import load_dotenv
 
 load_dotenv()
 
-
-def create_session():
-    ua = UserAgent()
-    session = requests.Session()
+async def create_client():
     proxy_user = os.getenv('PROXY_USER')
     proxy_pass = os.getenv('PROXY_PASS')
     proxy_host = os.getenv('PROXY_HOST')
     proxy_port = os.getenv('PROXY_PORT')
-    session.headers.update({
-        'User-Agent': ua.random,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1'
-    })
+    
+    proxy_url = None
     if proxy_user and proxy_pass and proxy_host and proxy_port:
         proxy_url = f"http://{proxy_user}:{proxy_pass}@{proxy_host}:{proxy_port}"
-        session.proxies = {
-            'http': proxy_url,
-            'https': proxy_url
+    
+    client = Client(
+        impersonate=Impersonate.Chrome137,
+        proxy=proxy_url,
+        headers={
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
         }
-    return session
+    )
+    return client
 
-def get_current_ip(session):
+async def get_current_ip(client):
     try:
-        response = session.get('https://ip.decodo.com/json', timeout=5)
+        response = await client.get('https://ip.decodo.com/json')
         if response.status_code == 200:
-            return json.loads(response.text)['proxy']['ip']
+            data = await response.json()
+            return data['proxy']['ip']
     except:
         pass
     return None
 
-def get(session, url):
+async def get(client, url):
     try:
-        return session.get(url, allow_redirects=False, timeout=5)
+        return await client.get(url, allow_redirects=False)
     except:
         return None
 
-def readiness_probe(session):
+async def readiness_probe(client):
     try:
         probe_url = "http://dcba.popcash.net/znWaa3gu"
-        response = session.get(probe_url, timeout=5)
-        return response.status_code == 204
-    except:
+        print(f"Testing readiness probe: {probe_url}")
+        response = await client.get(probe_url)
+        success = response is not None
+        print(f"Readiness probe result: {success}")
+        return success
+    except Exception as e:
+        print(f"Readiness probe error: {e}")
         return False
 
 def wrap_target_url(target_url):
@@ -71,6 +75,13 @@ def wrap_target_url(target_url):
     b64 = base64.b64encode(esc.encode()).decode()
     cb = f"{int(time.time()*1000)}.{random.randint(0, 1000000)}"
     return f"http://p.pcdelv.com/go/{uid}/{wid}/{b64}?cb={cb}"
+
+def build_vi_url(v2_path: str, go_url: str) -> str:
+    base = v2_path.rsplit('/', 1)[0]
+    cb = f"{int(time.time()*1000)}.{random.randint(0,1_000_000)}"
+    qs = f"cb={cb}&sw=1366&sh=768&tz=-120"
+    https_base = "https://p.pcdelv.com"
+    return f"{https_base}{base}/vi?{qs}"
 
 def format_bytes(bytes_value):
     if bytes_value >= 1024 * 1024 * 1024:
@@ -85,8 +96,8 @@ def format_bytes(bytes_value):
 def measure_request(response):
     if not response:
         return 0, 0
-    req_size = len(f"GET {response.url} HTTP/1.1") + len(str(response.request.headers)) + 100
-    resp_size = len(response.content) + len(str(response.headers)) + 50
+    req_size = len(f"GET {response.url} HTTP/1.1") + 100
+    resp_size = response.content_length or 1000  # Use content_length or estimate
     return req_size, resp_size
 
 running = True
@@ -99,69 +110,109 @@ def signal_handler(signum, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
-target_url = "https://globalstreaming.lol/"
-total_data_sent = 0
-total_data_received = 0
-successful_cycles = 0
+async def main():
+    target_url = "https://globalstreaming.lol/"
+    total_data_sent = 0
+    total_data_received = 0
+    successful_cycles = 0
 
-
-while running:
-    try:
-        session = create_session()
-        current_ip = None
-        if successful_cycles < 2:
-            current_ip = get_current_ip(session)
-        
-        if not readiness_probe(session):
-            continue
-        
-        total_sent = total_received = 0
-        go_url = wrap_target_url(target_url)
-        
-        r = get(session, go_url)
-        if not r:
-            continue
-        req_size, resp_size = measure_request(r)
-        total_sent += req_size
-        total_received += resp_size
-        
-        v2_match = re.search(r'href="([^"]+)"', r.text or "")
-        if not v2_match:
-            continue
+    print("Starting bot...")
+    while running:
+        try:
+            client = await create_client()
+            current_ip = None
+            if successful_cycles < 2:
+                current_ip = await get_current_ip(client)
             
-        v2_url = urljoin(go_url, v2_match.group(1))
-        session.headers["Referer"] = go_url
-        
-        v2_response = get(session, v2_url)
-        if not v2_response:
-            continue
-        req_size2, resp_size2 = measure_request(v2_response)
-        total_sent += req_size2
-        total_received += resp_size2
-        
-        if v2_response.status_code == 302 and "Location" in v2_response.headers:
-            final_url = v2_response.headers["Location"]
-            final_response = get(session, final_url)
-            if final_response:
-                req_size3, resp_size3 = measure_request(final_response)
-                total_sent += req_size3
-                total_received += resp_size3
-        
-        total_data_sent += total_sent
-        total_data_received += total_received
-        successful_cycles += 1
-        
-        if current_ip:
-            print(f"Cycle {successful_cycles} [IP: {current_ip}]: Sent {format_bytes(total_sent)} Received {format_bytes(total_received)} | Total: {format_bytes(total_data_sent + total_data_received)}")
-        else:
-            print(f"Cycle {successful_cycles}: Sent {format_bytes(total_sent)} Received {format_bytes(total_received)} | Total: {format_bytes(total_data_sent + total_data_received)}")
-    except KeyboardInterrupt:
-        print("\nKeyboard interrupt received. Exiting...")
-        break
-    except Exception as e:
-        print("Error ", e)
+            if not await readiness_probe(client):
+                print("Readiness probe failed, retrying...")
+                continue
+            
+            total_sent = total_received = 0
+            go_url = wrap_target_url(target_url)
+            print(f"Attempting to fetch: {go_url}")
+            
+            r = await get(client, go_url)
+            if not r:
+                print("Failed to get initial response")
+                continue
+            print(f"Initial response status: {r.status_code}")
+            req_size, resp_size = measure_request(r)
+            total_sent += req_size
+            total_received += resp_size
+            
+            go_url_https = go_url
+            if r.status_code in (301, 302, 303, 307, 308) and "Location" in r.headers:
+                go_url_https = r.headers["Location"]
+                print(f"Following redirect to: {go_url_https}")
+                r = await get(client, go_url_https)
+                if not r or r.status_code != 200:
+                    print(f"HTTPS redirect failed: {r.status_code if r else 'None'}")
+                    continue
+                req_size_https, resp_size_https = measure_request(r)
+                total_sent += req_size_https
+                total_received += resp_size_https
+            
+            text_content = await r.text()
+            print(f"HTML content length: {len(text_content) if text_content else 0}")
+            v2_match = re.search(r'href="([^"]+)"', text_content or "")
+            if not v2_match:
+                print("No v2 URL found in HTML content")
+                continue
+            print(f"Found v2 path: {v2_match.group(1)}")
+                
+            v2_path = v2_match.group(1)
+            
+            vi_url = build_vi_url(v2_path, go_url_https)
+            print(f"VI URL: {vi_url}")
+            client.headers["Referer"] = go_url_https
+            vi_resp = await get(client, vi_url)
+            if vi_resp and vi_resp.status_code == 200:
+                print(f"VI request successful: {vi_resp.status_code}")
+                req_size_vi, resp_size_vi = measure_request(vi_resp)
+                total_sent += req_size_vi
+                total_received += resp_size_vi
+            else:
+                print(f"VI request failed: {vi_resp.status_code if vi_resp else 'None'} - continuing anyway")
+                # Continue anyway to test CL functionality
+            
+            cl_url = f"https://p.pcdelv.com{v2_path}"
+            print(f"CL URL: {cl_url}")
+            v2_response = await get(client, cl_url)
+            if not v2_response:
+                print("CL request failed: None")
+                continue
+            print(f"CL request successful: {v2_response.status_code}")
+            req_size2, resp_size2 = measure_request(v2_response)
+            total_sent += req_size2
+            total_received += resp_size2
+            
+            if v2_response.status_code == 302 and "Location" in v2_response.headers:
+                final_url = v2_response.headers["Location"]
+                final_response = await get(client, final_url)
+                if final_response:
+                    req_size3, resp_size3 = measure_request(final_response)
+                    total_sent += req_size3
+                    total_received += resp_size3
+            
+            total_data_sent += total_sent
+            total_data_received += total_received
+            successful_cycles += 1
+            
+            if current_ip:
+                print(f"Cycle {successful_cycles} [IP: {current_ip}]: Sent {format_bytes(total_sent)} Received {format_bytes(total_received)} | Total: {format_bytes(total_data_sent + total_data_received)}")
+            else:
+                print(f"Cycle {successful_cycles}: Sent {format_bytes(total_sent)} Received {format_bytes(total_received)} | Total: {format_bytes(total_data_sent + total_data_received)}")
+        except KeyboardInterrupt:
+            print("\nKeyboard interrupt received. Exiting...")
+            break
+        except Exception as e:
+            print("Error ", e)
 
-    if running:
-        time.sleep(0.0)
+        if running:
+            await asyncio.sleep(0.0)
 
-print(f"Final stats: {successful_cycles} cycles, {format_bytes(total_data_sent + total_data_received)} total")
+    print(f"Final stats: {successful_cycles} cycles, {format_bytes(total_data_sent + total_data_received)} total")
+
+if __name__ == "__main__":
+    asyncio.run(main())
