@@ -1,0 +1,19 @@
+{
+  "name": "bot",
+  "version": "0.0.1",
+  "main": "src/main.tsjs",
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc",
+    "start": "ts-node src/main.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "playwright": "^1.55.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.2"
+  }
+}
