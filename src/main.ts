@@ -9,7 +9,7 @@ loadEnv()
 const PROXY_USER = process.env.PROXY_USER
 const PROXY_PASS = process.env.PROXY_PASS
 const PROXY_HOST = process.env.PROXY_HOST
-const PROXY_PORT_START = 10000
+const PROXY_PORT_START = 10100
 const PROXY_PORT_END = 20000
 const MAX_ITERATIONS = 1000000000
 
@@ -147,7 +147,7 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
     route.continue()
   })
   
-  // Track network requests for data measurement
+  // Track network requests for data measurement (excluding cache hits)
   page.on('request', (request) => {
     const resourceType = request.resourceType()
     const allowedTypes = ['document', 'script', 'xhr', 'fetch']
@@ -162,13 +162,19 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
       const headerSize = 200 // estimate
       const totalSent = urlSize + postSize + headerSize
       
+      // Check if this will be served from cache
+      const willBeCacheHit = CACHED_FILES.includes(url) && fileCache.has(url)
+      
       console.log(`[REQUEST] ${resourceType.toUpperCase()} ${method} ${url}`)
       if (postData) {
         console.log(`  POST Data: ${formatBytes(postSize)}`)
       }
-      console.log(`  URL: ${formatBytes(urlSize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSent)}`)
+      console.log(`  URL: ${formatBytes(urlSize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSent)}${willBeCacheHit ? ' (CACHED - NOT COUNTED)' : ''}`)
       
-      totalBytesSent += totalSent
+      // Only count actual network requests, not cache hits
+      if (!willBeCacheHit) {
+        totalBytesSent += totalSent
+      }
     }
   })
   
@@ -181,25 +187,42 @@ async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesR
       
       // Only count allowed responses
       if (allowedTypes.includes(resourceType)) {
-        const body = await response.body()
         const url = response.url()
         const status = response.status()
-        const contentType = response.headers()['content-type'] || 'unknown'
-        const bodySize = body.length
+        let body: Buffer
+        let bodySize: number
+        let contentType: string
+        let isCacheHit = false
+        
+        // Check if this was served from cache
+        if (CACHED_FILES.includes(url) && fileCache.has(url)) {
+          isCacheHit = true
+          const cached = fileCache.get(url)!
+          bodySize = cached.content.length
+          contentType = cached.contentType
+        } else {
+          body = await response.body()
+          bodySize = body.length
+          contentType = response.headers()['content-type'] || 'unknown'
+          
+          // Cache the file if it's in our cache list
+          if (CACHED_FILES.includes(url) && status === 200) {
+            fileCache.set(url, { content: body, contentType })
+            console.log(`[CACHED] Stored ${url} in cache (${formatBytes(bodySize)})`)
+          }
+        }
+        
         const headerSize = 500 // estimate
         const totalSize = bodySize + headerSize
         
-        // Cache the file if it's in our cache list
-        if (CACHED_FILES.includes(url) && !fileCache.has(url) && status === 200) {
-          fileCache.set(url, { content: body, contentType })
-          console.log(`[CACHED] Stored ${url} in cache (${formatBytes(bodySize)})`)
-        }
-        
         console.log(`[RESPONSE] ${resourceType.toUpperCase()} ${status} ${url}`)
         console.log(`  Content-Type: ${contentType}`)
-        console.log(`  Body: ${formatBytes(bodySize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSize)}`)
+        console.log(`  Body: ${formatBytes(bodySize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSize)}${isCacheHit ? ' (CACHED - NOT COUNTED)' : ''}`)
         
-        totalBytesReceived += totalSize
+        // Only count actual network responses, not cache hits
+        if (!isCacheHit) {
+          totalBytesReceived += totalSize
+        }
       }
     } catch (e) {
       if (!isClosing) {
@@ -557,8 +580,8 @@ async function main(): Promise<void> {
       console.log(`Iteration ${i + 1} completed in ${duration}ms`)
       console.log(`Memory: RSS ${memAfter.rss}MB (Delta ${(memAfter.rss - memBefore.rss).toFixed(1)}MB), Heap ${memAfter.heapUsed}MB`)
       console.log(`System Memory: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(2)}GB free`)
-      console.log(`Network: Sent ${formatBytes(networkData.bytesSent)}, Received ${formatBytes(networkData.bytesReceived)}`)
-      console.log(`Total Network: Sent ${formatBytes(totalBytesSent)}, Received ${formatBytes(totalBytesReceived)}`)
+      console.log(`Network (Real): Sent ${formatBytes(networkData.bytesSent)}, Received ${formatBytes(networkData.bytesReceived)}`)
+      console.log(`Cumulative (Real): Sent ${formatBytes(totalBytesSent)}, Received ${formatBytes(totalBytesReceived)}`)
       
     } catch (error) {
       console.error(`Error in iteration ${i + 1}:`, error)
@@ -577,7 +600,7 @@ async function main(): Promise<void> {
   const finalMem = getMemoryUsage()
   console.log(`Final Memory: RSS ${finalMem.rss}MB, Heap ${finalMem.heapUsed}MB`)
   console.log(`Final System Memory: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(2)}GB free`)
-  console.log(`Final Total Network: Sent ${formatBytes(totalBytesSent)}, Received ${formatBytes(totalBytesReceived)}`)
+  console.log(`Final Cumulative (Real): Sent ${formatBytes(totalBytesSent)}, Received ${formatBytes(totalBytesReceived)}`)
   
   // Show cache statistics
   console.log('\n=== Cache Statistics ===')
