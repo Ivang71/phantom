@@ -4,14 +4,17 @@ const UserAgent = require('user-agents')
 import { config as loadEnv } from 'dotenv'
 import * as os from 'os'
 
-chromium.use(StealthPlugin())
+// Configure stealth plugin with error handling
+const stealthPlugin = StealthPlugin()
+chromium.use(stealthPlugin)
 loadEnv()
 
 const PROXY_USER = process.env.PROXY_USER
 const PROXY_PASS = process.env.PROXY_PASS
 const PROXY_HOST = process.env.PROXY_HOST
 const PROXY_PORT_START = 10000
-const MAX_ITERATIONS = 10
+const PROXY_PORT_END = 20000
+const MAX_ITERATIONS = 1000000000
 
 const TARGET_URL = 'https://globalstreaming.lol/'
 
@@ -70,7 +73,7 @@ async function createBrowserWithProxy(proxyPort: number) {
   }
   
   return await chromium.launch({
-    headless: false, // dev only
+    headless: true, // dev only
     args: [
       '--no-first-run', 
       '--disable-blink-features=AutomationControlled',
@@ -85,8 +88,10 @@ async function createBrowserWithProxy(proxyPort: number) {
   })
 }
 
-async function visitSite(proxyPort: number): Promise<void> {
+async function visitSite(proxyPort: number): Promise<{ bytesSent: number, bytesReceived: number }> {
   const browser = await createBrowserWithProxy(proxyPort)
+  let totalBytesSent = 0
+  let totalBytesReceived = 0
 
   const userAgent = new UserAgent({ deviceCategory: 'desktop' })
   const context = await browser.newContext({
@@ -98,6 +103,27 @@ async function visitSite(proxyPort: number): Promise<void> {
   })
 
   const page = await context.newPage()
+  
+  // Track network requests for data measurement
+  page.on('request', (request) => {
+    const postData = request.postData()
+    if (postData) {
+      totalBytesSent += Buffer.byteLength(postData, 'utf8')
+    }
+    // Estimate header size
+    totalBytesSent += Buffer.byteLength(request.url(), 'utf8') + 200 // rough estimate for headers
+  })
+  
+  page.on('response', async (response) => {
+    try {
+      const body = await response.body()
+      totalBytesReceived += body.length
+      // Add headers size estimate
+      totalBytesReceived += 500 // rough estimate for response headers
+    } catch (e) {
+      // Response might be already consumed or unavailable
+    }
+  })
   
   context.on('page', async (newPage) => {
     setTimeout(async () => {
@@ -122,7 +148,7 @@ async function visitSite(proxyPort: number): Promise<void> {
   await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 30000 })
   await page.waitForTimeout(3000)
   
-  if (page.isClosed()) return
+  if (page.isClosed()) return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
 
   let targetDiv = null
   try {
@@ -136,7 +162,7 @@ async function visitSite(proxyPort: number): Promise<void> {
       }
     }
   } catch (e) {
-    return
+    return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
   }
   
   if (!targetDiv) {
@@ -177,8 +203,14 @@ async function visitSite(proxyPort: number): Promise<void> {
       if (page.url() !== TARGET_URL) break
     }
     if (page.url() === TARGET_URL) {
-      await browser.close()
-      return
+      try {
+        const contexts = browser.contexts()
+        for (const context of contexts) {
+          await context.close()
+        }
+        await browser.close()
+      } catch (e) {}
+      return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
     }
   }
   
@@ -210,8 +242,14 @@ async function visitSite(proxyPort: number): Promise<void> {
       const currentUrl = page.url()
       if (currentUrl !== TARGET_URL) {
         if (currentUrl.includes('p.pcdelv.com')) {
-          await browser.close()
-          return
+          try {
+            const contexts = browser.contexts()
+            for (const context of contexts) {
+              await context.close()
+            }
+            await browser.close()
+          } catch (e) {}
+          return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
         }
         break
       }
@@ -240,8 +278,14 @@ async function visitSite(proxyPort: number): Promise<void> {
       const urlAfterEvaluate = page.url()
       if (urlAfterEvaluate !== TARGET_URL) {
         if (urlAfterEvaluate.includes('p.pcdelv.com')) {
-          await browser.close()
-          return
+          try {
+            const contexts = browser.contexts()
+            for (const context of contexts) {
+              await context.close()
+            }
+            await browser.close()
+          } catch (e) {}
+          return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
         }
         break
       }
@@ -316,8 +360,33 @@ async function visitSite(proxyPort: number): Promise<void> {
   })
 
   try {
+    // Close all pages first to prevent stealth plugin errors
+    const contexts = browser.contexts()
+    for (const context of contexts) {
+      const pages = context.pages()
+      for (const page of pages) {
+        try {
+          if (!page.isClosed()) {
+            await page.close()
+          }
+        } catch (e) {}
+      }
+      try {
+        await context.close()
+      } catch (e) {}
+    }
     await browser.close()
   } catch (e) {}
+  
+  return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 
 async function main(): Promise<void> {
@@ -330,44 +399,53 @@ async function main(): Promise<void> {
   console.log(`Load Average: [${sysInfo.loadAvg.join(', ')}]`)
   console.log('==============================\n')
 
+  let totalBytesSent = 0
+  let totalBytesReceived = 0
+
   for (let i = 0; i < MAX_ITERATIONS; i++) {
-    const currentProxyPort = PROXY_PORT_START + i
-    console.log(`\n🚀 Iteration ${i + 1}/${MAX_ITERATIONS} - Proxy port: ${currentProxyPort}`)
+    const currentProxyPort = PROXY_PORT_START + (i % (PROXY_PORT_END - PROXY_PORT_START + 1))
+    console.log(`\nIteration ${i + 1}/${MAX_ITERATIONS} - Proxy port: ${currentProxyPort}`)
     
     const memBefore = getMemoryUsage()
     const cpuBefore = getCpuUsage()
     const startTime = Date.now()
     
     try {
-      await visitSite(currentProxyPort)
+      const networkData = await visitSite(currentProxyPort)
       const duration = Date.now() - startTime
       const memAfter = getMemoryUsage()
       const cpuAfter = getCpuUsage()
       
-      console.log(`✅ Iteration ${i + 1} completed in ${duration}ms`)
-      console.log(`📊 Memory: RSS ${memAfter.rss}MB (Δ${(memAfter.rss - memBefore.rss).toFixed(1)}MB), Heap ${memAfter.heapUsed}MB`)
-      console.log(`🖥️  CPU: ${cpuAfter.usage}% usage, Load: [${os.loadavg().map(l => l.toFixed(2)).join(', ')}]`)
-      console.log(`💾 System Memory: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(2)}GB free`)
+      totalBytesSent += networkData.bytesSent
+      totalBytesReceived += networkData.bytesReceived
+      
+      console.log(`Iteration ${i + 1} completed in ${duration}ms`)
+      console.log(`Memory: RSS ${memAfter.rss}MB (Delta ${(memAfter.rss - memBefore.rss).toFixed(1)}MB), Heap ${memAfter.heapUsed}MB`)
+      console.log(`CPU: ${cpuAfter.usage}% usage, Load: [${os.loadavg().map(l => l.toFixed(2)).join(', ')}]`)
+      console.log(`System Memory: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(2)}GB free`)
+      console.log(`Network: Sent ${formatBytes(networkData.bytesSent)}, Received ${formatBytes(networkData.bytesReceived)}`)
+      console.log(`Total Network: Sent ${formatBytes(totalBytesSent)}, Received ${formatBytes(totalBytesReceived)}`)
       
     } catch (error) {
-      console.error(`❌ Error in iteration ${i + 1}:`, error)
+      console.error(`Error in iteration ${i + 1}:`, error)
       const memAfter = getMemoryUsage()
-      console.log(`📊 Memory after error: RSS ${memAfter.rss}MB, Heap ${memAfter.heapUsed}MB`)
+      console.log(`Memory after error: RSS ${memAfter.rss}MB, Heap ${memAfter.heapUsed}MB`)
     }
     
-    // Shorter delay between iterations for efficiency
+    // Delay between iterations for proper cleanup
     if (i < MAX_ITERATIONS - 1) {
-      console.log(`⏳ Waiting 1s before next iteration...`)
-      await new Promise(resolve => setTimeout(resolve, 1000))
+      console.log(`Waiting 2s before next iteration...`)
+      await new Promise(resolve => setTimeout(resolve, 2000))
     }
   }
   
-  console.log('\n🏁 All iterations completed!')
+  console.log('\nAll iterations completed!')
   const finalMem = getMemoryUsage()
   const finalCpu = getCpuUsage()
-  console.log(`📊 Final Memory: RSS ${finalMem.rss}MB, Heap ${finalMem.heapUsed}MB`)
-  console.log(`🖥️  Final CPU: ${finalCpu.usage}% usage`)
-  console.log(`💾 Final System Memory: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(2)}GB free`)
+  console.log(`Final Memory: RSS ${finalMem.rss}MB, Heap ${finalMem.heapUsed}MB`)
+  console.log(`Final CPU: ${finalCpu.usage}% usage`)
+  console.log(`Final System Memory: ${(os.freemem() / 1024 / 1024 / 1024).toFixed(2)}GB free`)
+  console.log(`Final Total Network: Sent ${formatBytes(totalBytesSent)}, Received ${formatBytes(totalBytesReceived)}`)
 }
 
 main().catch(err => {
