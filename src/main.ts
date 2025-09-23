@@ -3,6 +3,7 @@ import { chromium } from 'playwright-extra'
 const UserAgent = require('user-agents')
 import { config as loadEnv } from 'dotenv'
 import * as os from 'os'
+import { StatsManager } from './stats'
 
 loadEnv()
 
@@ -12,7 +13,7 @@ const PROXY_HOST = process.env.PROXY_HOST
 const PROXY_PORT_START = 10000
 const PROXY_PORT_END = 20000
 const MAX_ITERATIONS = 1000000000
-const MAX_CONCURRENT_WORKERS = 60
+const MAX_CONCURRENT_WORKERS = 1
 const WORKER_BATCH_SIZE = 500000000
 
 const TARGET_URL = process.env.TARGET_URL as string
@@ -77,11 +78,25 @@ async function createBrowserWithProxy(proxyPort: number) {
   })
 }
 
-async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSent: number, bytesReceived: number }> {
+async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSent: number, bytesReceived: number, success: boolean }> {
+  // Add overall timeout to prevent hanging
+  return Promise.race([
+    visitSiteInternal(proxyPort, workerId),
+    new Promise<{ bytesSent: number, bytesReceived: number, success: boolean }>((_, reject) =>
+      setTimeout(() => reject(new Error('visitSite timeout after 120 seconds')), 120000)
+    )
+  ]).catch(async (error) => {
+    console.log(`[W${workerId}] [TIMEOUT] visitSite timed out or errored: ${error instanceof Error ? error.message : String(error)}`)
+    return { bytesSent: 0, bytesReceived: 0, success: false }
+  })
+}
+
+async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{ bytesSent: number, bytesReceived: number, success: boolean }> {
   const browser = await createBrowserWithProxy(proxyPort)
   let totalBytesSent = 0
   let totalBytesReceived = 0
   let isClosing = false
+  let wasSuccessful = false
 
   const userAgent = new UserAgent({ deviceCategory: 'desktop' })
   const context = await browser.newContext({
@@ -95,7 +110,8 @@ async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSe
   const page = await context.newPage()
   
   // Whitelist of allowed domains and their subdomains
-  const ALLOWED_DOMAINS = ['globalstreaming.lol', 'pcdelv.com', 'popcash.net']
+  const targetHostname = new URL(TARGET_URL).hostname
+  const ALLOWED_DOMAINS = [targetHostname, 'pcdelv.com', 'popcash.net']
   
   const isAllowedDomain = (url: string): boolean => {
     try {
@@ -111,42 +127,55 @@ async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSe
   // Block all domains except whitelisted ones, allow only HTML, JS, and XHR
   // Also handle caching for specific files
   await page.route('**/*', async (route) => {
-    const request = route.request()
-    const resourceType = request.resourceType()
-    const url = request.url()
-    const allowedTypes = ['document', 'script', 'xhr', 'fetch']
-    
-    // Block any domain not in whitelist
-    if (!isAllowedDomain(url)) {
-      console.log(`[W${workerId}] [BLOCKED] Non-whitelisted domain: ${url}`)
-      await route.abort()
-      return
-    }
-    
-    if (!allowedTypes.includes(resourceType)) {
-      route.abort()
-      return
-    }
-    
-    // Check if this file should be cached
-    if (CACHED_FILES.includes(url)) {
-      if (fileCache.has(url)) {
-        // Serve from cache
-        const cached = fileCache.get(url)!
-        console.log(`[W${workerId}] [CACHE HIT] Serving ${url} from cache (${formatBytes(cached.content.length)})`)
-        await route.fulfill({
-          status: 200,
-          contentType: cached.contentType,
-          body: cached.content
-        })
+    try {
+      const request = route.request()
+      const resourceType = request.resourceType()
+      const url = request.url()
+      const allowedTypes = ['document', 'script', 'xhr', 'fetch']
+      
+      // Block any domain not in whitelist
+      if (!isAllowedDomain(url)) {
+        console.log(`[W${workerId}] [BLOCKED] Non-whitelisted domain: ${url}`)
+        await route.abort()
         return
-      } else {
-        // First time - fetch and cache
-        console.log(`[W${workerId}] [CACHE MISS] Fetching ${url} for caching`)
       }
+      
+      if (!allowedTypes.includes(resourceType)) {
+        await route.abort()
+        return
+      }
+      
+      // Check if this file should be cached
+      if (CACHED_FILES.includes(url)) {
+        if (fileCache.has(url)) {
+          // Serve from cache
+          const cached = fileCache.get(url)!
+          console.log(`[W${workerId}] [CACHE HIT] Serving ${url} from cache (${formatBytes(cached.content.length)})`)
+          await route.fulfill({
+            status: 200,
+            contentType: cached.contentType,
+            body: cached.content
+          })
+          return
+        } else {
+          // First time - fetch and cache
+          console.log(`[W${workerId}] [CACHE MISS] Fetching ${url} for caching`)
+        }
+      }
+      
+      // Add timeout for route continuation
+      const continuePromise = route.continue()
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Route timeout')), 10000)
+      )
+      
+      await Promise.race([continuePromise, timeoutPromise])
+    } catch (e) {
+      console.log(`[W${workerId}] [ROUTE ERROR] ${route.request().url()}: ${e instanceof Error ? e.message : String(e)}`)
+      try {
+        await route.abort()
+      } catch (abortError) {}
     }
-    
-    route.continue()
   })
   
   // Track network requests for data measurement (excluding cache hits)
@@ -203,14 +232,25 @@ async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSe
           bodySize = cached.content.length
           contentType = cached.contentType
         } else {
-          body = await response.body()
-          bodySize = body.length
-          contentType = response.headers()['content-type'] || 'unknown'
-          
-          // Cache the file if it's in our cache list
-          if (CACHED_FILES.includes(url) && status === 200) {
-            fileCache.set(url, { content: body, contentType })
-            console.log(`[W${workerId}] [CACHED] Stored ${url} in cache (${formatBytes(bodySize)})`)
+          // Add timeout for response.body() to prevent hanging
+          try {
+            const bodyPromise = response.body()
+            const timeoutPromise = new Promise<Buffer>((_, reject) => 
+              setTimeout(() => reject(new Error('Response body timeout')), 10000)
+            )
+            body = await Promise.race([bodyPromise, timeoutPromise])
+            bodySize = body.length
+            contentType = response.headers()['content-type'] || 'unknown'
+            
+            // Cache the file if it's in our cache list
+            if (CACHED_FILES.includes(url) && status === 200) {
+              fileCache.set(url, { content: body, contentType })
+              console.log(`[W${workerId}] [CACHED] Stored ${url} in cache (${formatBytes(bodySize)})`)
+            }
+          } catch (bodyError) {
+            console.log(`[W${workerId}] [BODY ERROR] Failed to get response body for ${url}: ${bodyError instanceof Error ? bodyError.message : String(bodyError)}`)
+            bodySize = 0
+            contentType = 'unknown'
           }
         }
         
@@ -269,13 +309,23 @@ async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSe
     } catch (e) {}
   })
   
-  page.setDefaultTimeout(30000)
-  page.setDefaultNavigationTimeout(30000)
+  page.setDefaultTimeout(15000)
+  page.setDefaultNavigationTimeout(15000)
 
-  await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 30000 })
-  await page.waitForTimeout(3000)
+  try {
+    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 15000 })
+    await page.waitForTimeout(2000)
+  } catch (e) {
+    console.log(`[W${workerId}] [TIMEOUT] Page load timeout or error: ${e instanceof Error ? e.message : String(e)}`)
+    try {
+      await page.close()
+      await context.close()
+      await browser.close()
+    } catch (e) {}
+    return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
+  }
   
-  if (page.isClosed()) return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
+  if (page.isClosed()) return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
 
   // Force trigger PopCash events in case content is cached
   try {
@@ -307,7 +357,7 @@ async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSe
       }
     }
   } catch (e) {
-    return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
+    return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
   }
   
   if (!targetDiv) {
@@ -358,7 +408,7 @@ async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSe
         await context.close()
         await browser.close()
       } catch (e) {}
-      return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
+      return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
     }
   }
   
@@ -391,6 +441,7 @@ async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSe
       if (currentUrl !== TARGET_URL) {
         if (currentUrl.includes('p.pcdelv.com')) {
           isClosing = true // Set flag to stop processing responses
+          wasSuccessful = true
           console.log(`[W${workerId}] [SUCCESS] Redirect detected to ${currentUrl}`)
           // Wait for redirect chain to complete
           try {
@@ -403,7 +454,7 @@ async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSe
             await context.close()
             await browser.close()
           } catch (e) {}
-          return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
+          return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
         }
         break
       }
@@ -433,6 +484,7 @@ async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSe
       if (urlAfterEvaluate !== TARGET_URL) {
         if (urlAfterEvaluate.includes('p.pcdelv.com')) {
           isClosing = true // Set flag to stop processing responses
+          wasSuccessful = true
           console.log(`[W${workerId}] [SUCCESS] Redirect detected to ${urlAfterEvaluate}`)
           // Wait for redirect chain to complete
           try {
@@ -445,7 +497,7 @@ async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSe
             await context.close()
             await browser.close()
           } catch (e) {}
-          return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
+          return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
         }
         break
       }
@@ -512,7 +564,7 @@ async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSe
     await browser.close()
   } catch (e) {}
   
-  return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived }
+  return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
 }
 
 function formatBytes(bytes: number): string {
@@ -536,6 +588,7 @@ const workerStats = new Map<number, WorkerStats>()
 let globalIterationCount = 0
 let globalBytesSent = 0
 let globalBytesReceived = 0
+let statsManager: StatsManager
 
 async function runWorker(workerId: number, iterationsToRun: number): Promise<void> {
   const stats: WorkerStats = {
@@ -568,7 +621,12 @@ async function runWorker(workerId: number, iterationsToRun: number): Promise<voi
       globalBytesSent += networkData.bytesSent
       globalBytesReceived += networkData.bytesReceived
       
-      console.log(`[W${workerId}] Iteration ${stats.iterations} completed in ${duration}ms (Port: ${currentProxyPort})`)
+      // Record successful cycle in stats manager
+      if (networkData.success) {
+        statsManager.recordSuccessfulCycle(networkData.bytesSent, networkData.bytesReceived)
+      }
+      
+      console.log(`[W${workerId}] Iteration ${stats.iterations} completed in ${duration}ms (Port: ${currentProxyPort}) ${networkData.success ? '[SUCCESS]' : '[NO SUCCESS]'}`)
       console.log(`[W${workerId}] Network: Sent ${formatBytes(networkData.bytesSent)}, Received ${formatBytes(networkData.bytesReceived)}`)
       
     } catch (error) {
@@ -604,9 +662,17 @@ async function printStats(): Promise<void> {
     console.log(`W${workerId}: ${stats.iterations} iterations, ${stats.errors} errors, ${formatBytes(stats.bytesSent)} sent, ${formatBytes(stats.bytesReceived)} received (${Math.round(timeSinceActivity/1000)}s ago)`)
   }
   console.log('================================\n')
+  
+  // Print persistent stats
+  if (statsManager) {
+    statsManager.printStats()
+  }
 }
 
 async function main(): Promise<void> {
+  // Initialize stats manager
+  statsManager = new StatsManager('./bot-stats.json')
+  
   console.log('=== PARALLEL BOT SYSTEM ===')
   const sysInfo = getSystemInfo()
   console.log(`Platform: ${sysInfo.platform} ${sysInfo.arch}`)
@@ -617,6 +683,9 @@ async function main(): Promise<void> {
   console.log(`Worker Batch Size: ${WORKER_BATCH_SIZE}`)
   console.log(`Cached Files: ${CACHED_FILES.length} files configured for caching`)
   console.log('============================\n')
+  
+  // Print initial stats
+  statsManager.printStats()
 
   // Start stats printer
   const statsInterval = setInterval(printStats, 15000)
@@ -679,9 +748,34 @@ async function main(): Promise<void> {
   }
   console.log(`Total Cache Size: ${formatBytes(totalCacheSize)}`)
   console.log('=========================')
+  
+  // Cleanup stats manager
+  if (statsManager) {
+    statsManager.cleanup()
+  }
 }
+
+// Handle process termination gracefully
+process.on('SIGINT', () => {
+  console.log('\nReceived SIGINT, cleaning up...')
+  if (statsManager) {
+    statsManager.cleanup()
+  }
+  process.exit(0)
+})
+
+process.on('SIGTERM', () => {
+  console.log('\nReceived SIGTERM, cleaning up...')
+  if (statsManager) {
+    statsManager.cleanup()
+  }
+  process.exit(0)
+})
 
 main().catch(err => {
   console.error(err)
+  if (statsManager) {
+    statsManager.cleanup()
+  }
   process.exitCode = 1
 })
