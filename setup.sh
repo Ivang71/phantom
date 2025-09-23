@@ -11,8 +11,8 @@ npm install --global yarn
 
 
 #settings up playwright
-npx playwright install --with-deps
-npx playwright install webkit
+npx --yes playwright install --with-deps
+npx --yes playwright install webkit
 
 
 # setting up project
