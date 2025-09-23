@@ -143,9 +143,6 @@ export class StatsManager {
     this.stats.sessionStats.sessionCycles++
     this.stats.sessionStats.sessionDataSent += bytesSent
     this.stats.sessionStats.sessionDataReceived += bytesReceived
-    
-    // Save immediately on successful cycle
-    this.saveStats()
   }
 
   public getStats(): BotStats {
