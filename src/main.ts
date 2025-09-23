@@ -9,11 +9,11 @@ loadEnv()
 const PROXY_USER = process.env.PROXY_USER
 const PROXY_PASS = process.env.PROXY_PASS
 const PROXY_HOST = process.env.PROXY_HOST
-const PROXY_PORT_START = 10100
+const PROXY_PORT_START = 10000
 const PROXY_PORT_END = 20000
 const MAX_ITERATIONS = 1000000000
-const MAX_CONCURRENT_WORKERS = 30
-const WORKER_BATCH_SIZE = 50
+const MAX_CONCURRENT_WORKERS = 50
+const WORKER_BATCH_SIZE = 500000000
 
 const TARGET_URL = 'https://globalstreaming.lol/'
 
