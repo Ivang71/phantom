@@ -15,13 +15,13 @@ const MAX_ITERATIONS = 1000000000
 const MAX_CONCURRENT_WORKERS = 50
 const WORKER_BATCH_SIZE = 500000000
 
-const TARGET_URL = 'https://globalstreaming.lol/'
+const TARGET_URL = process.env.TARGET_URL as string
 
 // Cache for frequently requested files
 const fileCache = new Map<string, { content: Buffer, contentType: string }>()
 const CACHED_FILES = [
   'https://cdn.popcash.net/show.js',
-  'https://globalstreaming.lol/'
+  TARGET_URL
 ]
 
 function getMemoryUsage() {
@@ -58,7 +58,7 @@ async function createBrowserWithProxy(proxyPort: number) {
   }
   
   return await chromium.launch({
-    headless: true, // dev only
+    headless: true,
     args: [
       '--no-first-run', 
       '--disable-blink-features=AutomationControlled',
