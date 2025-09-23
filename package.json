@@ -1,11 +1,11 @@
 {
   "name": "bot",
   "version": "0.0.1",
-  "main": "src/main.tsjs",
+  "main": "src/main.ts",
   "license": "MIT",
   "scripts": {
-    "build": "tsc",
-    "start": "ts-node src/main.ts"
+    "start": "ts-node src/main.ts",
+    "prod": "tsc && node dist/main.js"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",

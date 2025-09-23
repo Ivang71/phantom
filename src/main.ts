@@ -13,17 +13,77 @@ const PROXY_HOST = process.env.PROXY_HOST
 const PROXY_PORT_START = 10000
 const PROXY_PORT_END = 20000
 const MAX_ITERATIONS = 1000000000
-const MAX_CONCURRENT_WORKERS = 1000
+const MAX_CONCURRENT_WORKERS = 2
 const WORKER_BATCH_SIZE = 500000000
+
+enum LogLevel {
+  ERROR = 0,
+  WARN = 1,
+  INFO = 2,
+  DEBUG = 3
+}
+
+const CURRENT_LOG_LEVEL = LogLevel.INFO
+
+function log(level: LogLevel, message: string, ...args: any[]): void {
+  if (level <= CURRENT_LOG_LEVEL) {
+    console.log(message, ...args)
+  }
+}
+
+function logError(message: string, ...args: any[]): void {
+  log(LogLevel.ERROR, message, ...args)
+}
+
+function logWarn(message: string, ...args: any[]): void {
+  log(LogLevel.WARN, message, ...args)
+}
+
+function logInfo(message: string, ...args: any[]): void {
+  log(LogLevel.INFO, message, ...args)
+}
+
+function logDebug(message: string, ...args: any[]): void {
+  log(LogLevel.DEBUG, message, ...args)
+}
 
 const TARGET_URL = process.env.TARGET_URL as string
 
-// Cache for frequently requested files
+// Centralized cache for frequently requested files
 const fileCache = new Map<string, { content: Buffer, contentType: string }>()
 const CACHED_FILES = [
   'https://cdn.popcash.net/show.js',
   TARGET_URL
 ]
+
+async function preloadCache(): Promise<void> {
+  logInfo('=== PRELOADING CACHE ===')
+  
+  for (const url of CACHED_FILES) {
+    try {
+      logInfo(`Downloading ${url}...`)
+      const response = await fetch(url)
+      
+      if (!response.ok) {
+        logWarn(`Failed to download ${url}: ${response.status} ${response.statusText}`)
+        continue
+      }
+      
+      const content = Buffer.from(await response.arrayBuffer())
+      const contentType = response.headers.get('content-type') || 'application/octet-stream'
+      
+      fileCache.set(url, { content, contentType })
+      logInfo(`✓ Cached ${url} (${formatBytes(content.length)}, ${contentType})`)
+      
+    } catch (error) {
+      logError(`Failed to download ${url}:`, error)
+    }
+  }
+  
+  const totalSize = Array.from(fileCache.values()).reduce((sum, cached) => sum + cached.content.length, 0)
+  logInfo(`Cache preloaded: ${fileCache.size}/${CACHED_FILES.length} files, ${formatBytes(totalSize)} total`)
+  logInfo('========================\n')
+}
 
 function getMemoryUsage() {
   const used = process.memoryUsage()
@@ -87,7 +147,7 @@ async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSe
       setTimeout(() => reject(new Error('visitSite timeout after 120 seconds')), 120000)
     )
   ]).catch(async (error) => {
-    console.log(`[W${workerId}] [TIMEOUT] visitSite timed out or errored: ${error instanceof Error ? error.message : String(error)}`)
+    logError(`[W${workerId}] [TIMEOUT] visitSite timed out or errored: ${error instanceof Error ? error.message : String(error)}`)
     return { bytesSent: 0, bytesReceived: 0, success: false }
   })
 }
@@ -102,9 +162,9 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   // Get Chrome version info
   try {
     const version = await browser.version()
-    console.log(`[W${workerId}] [BROWSER] Chrome version: ${version}`)
+    logDebug(`[W${workerId}] [BROWSER] Chrome version: ${version}`)
   } catch (e) {
-    console.log(`[W${workerId}] [BROWSER] Could not get Chrome version: ${e}`)
+    logDebug(`[W${workerId}] [BROWSER] Could not get Chrome version: ${e}`)
   }
 
   const userAgent = new UserAgent({ deviceCategory: 'desktop' })
@@ -116,7 +176,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     permissions: ['geolocation']
   })
   
-  console.log(`[W${workerId}] [BROWSER] User agent: ${userAgent.toString()}`)
+  logDebug(`[W${workerId}] [BROWSER] User agent: ${userAgent.toString()}`)
 
   const page = await context.newPage()
   
@@ -146,7 +206,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       
       // Block any domain not in whitelist
       if (!isAllowedDomain(url)) {
-        console.log(`[W${workerId}] [BLOCKED] Non-whitelisted domain: ${url}`)
+        logDebug(`[W${workerId}] [BLOCKED] Non-whitelisted domain: ${url}`)
         await route.abort()
         return
       }
@@ -156,12 +216,14 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         return
       }
       
-      // Check if this file should be cached
+      // Check if this file should be served from cache
       if (CACHED_FILES.includes(url)) {
         if (fileCache.has(url)) {
-          // Serve from cache
+          // Serve from pre-loaded cache
           const cached = fileCache.get(url)!
-          console.log(`[W${workerId}] [CACHE HIT] Serving ${url} from cache (${formatBytes(cached.content.length)})`)
+          globalCacheHits++
+          globalCacheBytesSaved += cached.content.length
+          logDebug(`[W${workerId}] [CACHE HIT] Serving ${url} from cache (${formatBytes(cached.content.length)})`)
           await route.fulfill({
             status: 200,
             contentType: cached.contentType,
@@ -169,8 +231,8 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
           })
           return
         } else {
-          // First time - fetch and cache
-          console.log(`[W${workerId}] [CACHE MISS] Fetching ${url} for caching`)
+          // Cache miss - file should have been pre-loaded
+          logWarn(`[W${workerId}] [CACHE MISS] ${url} not in pre-loaded cache, allowing network request`)
         }
       }
       
@@ -182,7 +244,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       
       await Promise.race([continuePromise, timeoutPromise])
     } catch (e) {
-      console.log(`[W${workerId}] [ROUTE ERROR] ${route.request().url()}: ${e instanceof Error ? e.message : String(e)}`)
+      logDebug(`[W${workerId}] [ROUTE ERROR] ${route.request().url()}: ${e instanceof Error ? e.message : String(e)}`)
       try {
         await route.abort()
       } catch (abortError) {}
@@ -207,11 +269,11 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       // Check if this will be served from cache
       const willBeCacheHit = CACHED_FILES.includes(url) && fileCache.has(url)
       
-      console.log(`[W${workerId}] [REQUEST] ${resourceType.toUpperCase()} ${method} ${url}`)
+      logDebug(`[W${workerId}] [REQUEST] ${resourceType.toUpperCase()} ${method} ${url}`)
       if (postData) {
-        console.log(`[W${workerId}]   POST Data: ${formatBytes(postSize)}`)
+        logDebug(`[W${workerId}]   POST Data: ${formatBytes(postSize)}`)
       }
-      console.log(`[W${workerId}]   URL: ${formatBytes(urlSize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSent)}${willBeCacheHit ? ' (CACHED - NOT COUNTED)' : ''}`)
+      logDebug(`[W${workerId}]   URL: ${formatBytes(urlSize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSent)}${willBeCacheHit ? ' (CACHED - NOT COUNTED)' : ''}`)
       
       // Only count actual network requests, not cache hits
       if (!willBeCacheHit) {
@@ -236,14 +298,14 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         let contentType: string
         let isCacheHit = false
         
-        // Check if this was served from cache
+        // Check if this was served from pre-loaded cache
         if (CACHED_FILES.includes(url) && fileCache.has(url)) {
           isCacheHit = true
           const cached = fileCache.get(url)!
           bodySize = cached.content.length
           contentType = cached.contentType
         } else {
-          // Add timeout for response.body() to prevent hanging
+          // Get response body for network requests
           try {
             const bodyPromise = response.body()
             const timeoutPromise = new Promise<Buffer>((_, reject) => 
@@ -252,14 +314,8 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
             body = await Promise.race([bodyPromise, timeoutPromise])
             bodySize = body.length
             contentType = response.headers()['content-type'] || 'unknown'
-            
-            // Cache the file if it's in our cache list
-            if (CACHED_FILES.includes(url) && status === 200) {
-              fileCache.set(url, { content: body, contentType })
-              console.log(`[W${workerId}] [CACHED] Stored ${url} in cache (${formatBytes(bodySize)})`)
-            }
           } catch (bodyError) {
-            console.log(`[W${workerId}] [BODY ERROR] Failed to get response body for ${url}: ${bodyError instanceof Error ? bodyError.message : String(bodyError)}`)
+            logDebug(`[W${workerId}] [BODY ERROR] Failed to get response body for ${url}: ${bodyError instanceof Error ? bodyError.message : String(bodyError)}`)
             bodySize = 0
             contentType = 'unknown'
           }
@@ -268,9 +324,9 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         const headerSize = 500 // estimate
         const totalSize = bodySize + headerSize
         
-        console.log(`[W${workerId}] [RESPONSE] ${resourceType.toUpperCase()} ${status} ${url}`)
-        console.log(`[W${workerId}]   Content-Type: ${contentType}`)
-        console.log(`[W${workerId}]   Body: ${formatBytes(bodySize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSize)}${isCacheHit ? ' (CACHED - NOT COUNTED)' : ''}`)
+        logDebug(`[W${workerId}] [RESPONSE] ${resourceType.toUpperCase()} ${status} ${url}`)
+        logDebug(`[W${workerId}]   Content-Type: ${contentType}`)
+        logDebug(`[W${workerId}]   Body: ${formatBytes(bodySize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSize)}${isCacheHit ? ' (CACHED - NOT COUNTED)' : ''}`)
         
         // Only count actual network responses, not cache hits
         if (!isCacheHit) {
@@ -279,7 +335,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       }
     } catch (e) {
       if (!isClosing) {
-        console.log(`[W${workerId}] [RESPONSE ERROR] ${response.url()}: ${e instanceof Error ? e.message : String(e)}`)
+        logDebug(`[W${workerId}] [RESPONSE ERROR] ${response.url()}: ${e instanceof Error ? e.message : String(e)}`)
       }
     }
   })
@@ -324,9 +380,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     } catch (e) {}
     
     // Log Chrome version and user agent for testing
-    console.log('Chrome version:', navigator.userAgent.match(/Chrome\/([0-9.]+)/)?.[1] || 'Unknown')
-    console.log('User agent:', navigator.userAgent)
-    console.log('navigator.webdriver:', navigator.webdriver)
+      // Browser detection logs removed for performance
   })
   
   page.setDefaultTimeout(15000)
@@ -336,7 +390,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 15000 })
     await page.waitForTimeout(2000)
   } catch (e) {
-    console.log(`[W${workerId}] [TIMEOUT] Page load timeout or error: ${e instanceof Error ? e.message : String(e)}`)
+    logWarn(`[W${workerId}] [TIMEOUT] Page load timeout or error: ${e instanceof Error ? e.message : String(e)}`)
     try {
       await page.close()
       await context.close()
@@ -462,7 +516,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         if (currentUrl.includes('p.pcdelv.com')) {
           isClosing = true // Set flag to stop processing responses
           wasSuccessful = true
-          console.log(`[W${workerId}] [SUCCESS] Redirect detected to ${currentUrl}`)
+          logInfo(`[W${workerId}] [SUCCESS] Redirect detected to ${currentUrl}`)
           // Wait for redirect chain to complete
           try {
             await page.waitForLoadState('networkidle', { timeout: 5000 })
@@ -505,7 +559,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         if (urlAfterEvaluate.includes('p.pcdelv.com')) {
           isClosing = true // Set flag to stop processing responses
           wasSuccessful = true
-          console.log(`[W${workerId}] [SUCCESS] Redirect detected to ${urlAfterEvaluate}`)
+          logInfo(`[W${workerId}] [SUCCESS] Redirect detected to ${urlAfterEvaluate}`)
           // Wait for redirect chain to complete
           try {
             await page.waitForLoadState('networkidle', { timeout: 5000 })
@@ -561,7 +615,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   
 
   // Proceed straight to clicking without waiting
-  console.log(`[W${workerId}] [PROCEEDING] Going straight to click actions without waiting for popup`)
+  logDebug(`[W${workerId}] [PROCEEDING] Going straight to click actions without waiting for popup`)
   
 
   
@@ -608,6 +662,8 @@ const workerStats = new Map<number, WorkerStats>()
 let globalIterationCount = 0
 let globalBytesSent = 0
 let globalBytesReceived = 0
+let globalCacheHits = 0
+let globalCacheBytesSaved = 0
 let statsManager: StatsManager
 
 async function runWorker(workerId: number, iterationsToRun: number): Promise<void> {
@@ -621,7 +677,7 @@ async function runWorker(workerId: number, iterationsToRun: number): Promise<voi
   }
   workerStats.set(workerId, stats)
 
-  console.log(`[W${workerId}] Worker started - will run ${iterationsToRun} iterations`)
+  logInfo(`[W${workerId}] Worker started - will run ${iterationsToRun} iterations`)
 
   for (let i = 0; i < iterationsToRun; i++) {
     const iterationNumber = globalIterationCount++
@@ -646,13 +702,15 @@ async function runWorker(workerId: number, iterationsToRun: number): Promise<voi
         statsManager.recordSuccessfulCycle(networkData.bytesSent, networkData.bytesReceived)
       }
       
-      console.log(`[W${workerId}] Iteration ${stats.iterations} completed in ${duration}ms (Port: ${currentProxyPort}) ${networkData.success ? '[SUCCESS]' : '[NO SUCCESS]'}`)
-      console.log(`[W${workerId}] Network: Sent ${formatBytes(networkData.bytesSent)}, Received ${formatBytes(networkData.bytesReceived)}`)
+      if (stats.iterations % 10 === 0 || networkData.success) {
+        logInfo(`[W${workerId}] Iteration ${stats.iterations} completed in ${duration}ms (Port: ${currentProxyPort}) ${networkData.success ? '[SUCCESS]' : '[NO SUCCESS]'}`)
+        logInfo(`[W${workerId}] Network: Sent ${formatBytes(networkData.bytesSent)}, Received ${formatBytes(networkData.bytesReceived)}`)
+      }
       
     } catch (error) {
       stats.errors++
       stats.lastActivity = new Date()
-      console.error(`[W${workerId}] Error in iteration ${stats.iterations + 1}:`, error)
+      logError(`[W${workerId}] Error in iteration ${stats.iterations + 1}:`, error)
     }
     
     // Small delay between iterations within worker
@@ -661,27 +719,28 @@ async function runWorker(workerId: number, iterationsToRun: number): Promise<voi
     }
   }
   
-  console.log(`[W${workerId}] Worker completed ${stats.iterations} iterations (${stats.errors} errors)`)
+  logInfo(`[W${workerId}] Worker completed ${stats.iterations} iterations (${stats.errors} errors)`)
 }
 
 async function printStats(): Promise<void> {
   const memUsage = getMemoryUsage()
   const sysInfo = getSystemInfo()
   
-  console.log('\n=== PARALLEL EXECUTION STATS ===')
-  console.log(`Active Workers: ${workerStats.size}`)
-  console.log(`Global Iterations: ${Array.from(workerStats.values()).reduce((sum, s) => sum + s.iterations, 0)}`)
-  console.log(`Global Errors: ${Array.from(workerStats.values()).reduce((sum, s) => sum + s.errors, 0)}`)
-  console.log(`Global Network: Sent ${formatBytes(globalBytesSent)}, Received ${formatBytes(globalBytesReceived)}`)
-  console.log(`Memory: RSS ${memUsage.rss}MB, Heap ${memUsage.heapUsed}MB`)
-  console.log(`System Memory: ${sysInfo.freeMemory}GB free of ${sysInfo.totalMemory}GB`)
+  logInfo('\n=== PARALLEL EXECUTION STATS ===')
+  logInfo(`Active Workers: ${workerStats.size}`)
+  logInfo(`Global Iterations: ${Array.from(workerStats.values()).reduce((sum, s) => sum + s.iterations, 0)}`)
+  logInfo(`Global Errors: ${Array.from(workerStats.values()).reduce((sum, s) => sum + s.errors, 0)}`)
+  logInfo(`Global Network: Sent ${formatBytes(globalBytesSent)}, Received ${formatBytes(globalBytesReceived)}`)
+  logInfo(`Cache Performance: ${globalCacheHits} hits, ${formatBytes(globalCacheBytesSaved)} saved`)
+  logInfo(`Memory: RSS ${memUsage.rss}MB, Heap ${memUsage.heapUsed}MB`)
+  logInfo(`System Memory: ${sysInfo.freeMemory}GB free of ${sysInfo.totalMemory}GB`)
   
-  console.log('\n--- Worker Details ---')
+  logInfo('\n--- Worker Details ---')
   for (const [workerId, stats] of workerStats.entries()) {
     const timeSinceActivity = Date.now() - stats.lastActivity.getTime()
-    console.log(`W${workerId}: ${stats.iterations} iterations, ${stats.errors} errors, ${formatBytes(stats.bytesSent)} sent, ${formatBytes(stats.bytesReceived)} received (${Math.round(timeSinceActivity/1000)}s ago)`)
+    logInfo(`W${workerId}: ${stats.iterations} iterations, ${stats.errors} errors, ${formatBytes(stats.bytesSent)} sent, ${formatBytes(stats.bytesReceived)} received (${Math.round(timeSinceActivity/1000)}s ago)`)
   }
-  console.log('================================\n')
+  logInfo('================================\n')
   
   // Print persistent stats
   if (statsManager) {
@@ -693,16 +752,19 @@ async function main(): Promise<void> {
   // Initialize stats manager
   statsManager = new StatsManager('./bot-stats.json')
   
-  console.log('=== PARALLEL BOT SYSTEM ===')
+  logInfo('=== PARALLEL BOT SYSTEM ===')
   const sysInfo = getSystemInfo()
-  console.log(`Platform: ${sysInfo.platform} ${sysInfo.arch}`)
-  console.log(`CPU Cores: ${sysInfo.cpuCount}`)
-  console.log(`Total Memory: ${sysInfo.totalMemory} GB`)
-  console.log(`Free Memory: ${sysInfo.freeMemory} GB`)
-  console.log(`Max Concurrent Workers: ${MAX_CONCURRENT_WORKERS}`)
-  console.log(`Worker Batch Size: ${WORKER_BATCH_SIZE}`)
-  console.log(`Cached Files: ${CACHED_FILES.length} files configured for caching`)
-  console.log('============================\n')
+  logInfo(`Platform: ${sysInfo.platform} ${sysInfo.arch}`)
+  logInfo(`CPU Cores: ${sysInfo.cpuCount}`)
+  logInfo(`Total Memory: ${sysInfo.totalMemory} GB`)
+  logInfo(`Free Memory: ${sysInfo.freeMemory} GB`)
+  logInfo(`Max Concurrent Workers: ${MAX_CONCURRENT_WORKERS}`)
+  logInfo(`Worker Batch Size: ${WORKER_BATCH_SIZE}`)
+  logInfo(`Cached Files: ${CACHED_FILES.length} files configured for caching`)
+  logInfo('============================\n')
+  
+  // Preload cache before starting workers
+  await preloadCache()
   
   // Print initial stats
   statsManager.printStats()
@@ -719,10 +781,10 @@ async function main(): Promise<void> {
     const iterationsThisBatch = Math.min(remainingIterations, WORKER_BATCH_SIZE * MAX_CONCURRENT_WORKERS)
     const iterationsPerWorker = Math.ceil(iterationsThisBatch / MAX_CONCURRENT_WORKERS)
     
-    console.log(`\n=== BATCH ${batchNumber} ===`)
-    console.log(`Running ${iterationsThisBatch} iterations across ${MAX_CONCURRENT_WORKERS} workers`)
-    console.log(`${iterationsPerWorker} iterations per worker`)
-    console.log('==================\n')
+    logInfo(`\n=== BATCH ${batchNumber} ===`)
+    logInfo(`Running ${iterationsThisBatch} iterations across ${MAX_CONCURRENT_WORKERS} workers`)
+    logInfo(`${iterationsPerWorker} iterations per worker`)
+    logInfo('==================\n')
 
     // Clear previous worker stats
     workerStats.clear()
@@ -741,33 +803,33 @@ async function main(): Promise<void> {
     
     totalIterationsRun += iterationsThisBatch
     
-    console.log(`\n=== BATCH ${batchNumber} COMPLETED ===`)
-    console.log(`Total iterations completed: ${totalIterationsRun}/${MAX_ITERATIONS}`)
+    logInfo(`\n=== BATCH ${batchNumber} COMPLETED ===`)
+    logInfo(`Total iterations completed: ${totalIterationsRun}/${MAX_ITERATIONS}`)
     await printStats()
     
     // Break between batches for cleanup
     if (totalIterationsRun < MAX_ITERATIONS) {
-      console.log('Waiting 5s before next batch...')
+      logInfo('Waiting 5s before next batch...')
       await new Promise(resolve => setTimeout(resolve, 5000))
     }
   }
 
   clearInterval(statsInterval)
   
-  console.log('\n=== ALL BATCHES COMPLETED ===')
+  logInfo('\n=== ALL BATCHES COMPLETED ===')
   await printStats()
   
   // Show cache statistics
-  console.log('\n=== Cache Statistics ===')
-  console.log(`Cached Files: ${fileCache.size}`)
+  logInfo('\n=== Cache Statistics ===')
+  logInfo(`Cached Files: ${fileCache.size}`)
   let totalCacheSize = 0
   for (const [url, cached] of fileCache.entries()) {
     const size = cached.content.length
     totalCacheSize += size
-    console.log(`  ${url}: ${formatBytes(size)}`)
+    logInfo(`  ${url}: ${formatBytes(size)}`)
   }
-  console.log(`Total Cache Size: ${formatBytes(totalCacheSize)}`)
-  console.log('=========================')
+  logInfo(`Total Cache Size: ${formatBytes(totalCacheSize)}`)
+  logInfo('=========================')
   
   // Cleanup stats manager
   if (statsManager) {
@@ -777,7 +839,7 @@ async function main(): Promise<void> {
 
 // Handle process termination gracefully
 process.on('SIGINT', () => {
-  console.log('\nReceived SIGINT, cleaning up...')
+  logInfo('\nReceived SIGINT, cleaning up...')
   if (statsManager) {
     statsManager.cleanup()
   }
@@ -785,7 +847,7 @@ process.on('SIGINT', () => {
 })
 
 process.on('SIGTERM', () => {
-  console.log('\nReceived SIGTERM, cleaning up...')
+  logInfo('\nReceived SIGTERM, cleaning up...')
   if (statsManager) {
     statsManager.cleanup()
   }
@@ -793,7 +855,7 @@ process.on('SIGTERM', () => {
 })
 
 main().catch(err => {
-  console.error(err)
+  logError('Fatal error:', err)
   if (statsManager) {
     statsManager.cleanup()
   }
