@@ -63,6 +63,7 @@ async function createBrowserWithProxy(proxyPort: number) {
     args: [
       '--no-first-run', 
       '--disable-blink-features=AutomationControlled',
+      '--enable-blink-features=IdleDetection',
       '--fast-start',
       '--disable-extensions',
       '--disable-default-apps',
@@ -98,6 +99,14 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   let isClosing = false
   let wasSuccessful = false
 
+  // Get Chrome version info
+  try {
+    const version = await browser.version()
+    console.log(`[W${workerId}] [BROWSER] Chrome version: ${version}`)
+  } catch (e) {
+    console.log(`[W${workerId}] [BROWSER] Could not get Chrome version: ${e}`)
+  }
+
   const userAgent = new UserAgent({ deviceCategory: 'desktop' })
   const context = await browser.newContext({
     userAgent: userAgent.toString(),
@@ -106,6 +115,8 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     timezoneId: 'America/New_York',
     permissions: ['geolocation']
   })
+  
+  console.log(`[W${workerId}] [BROWSER] User agent: ${userAgent.toString()}`)
 
   const page = await context.newPage()
   
@@ -289,7 +300,11 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     delete (window as any).navigator.__proto__.webdriver
     
     // Override navigator properties
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
+    Object.defineProperty(navigator, 'webdriver', { 
+      get: () => undefined,
+      configurable: true,
+      enumerable: true
+    })
     Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] })
     Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] })
     Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 })
@@ -307,6 +322,11 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         return originalQuery(parameters)
       }
     } catch (e) {}
+    
+    // Log Chrome version and user agent for testing
+    console.log('Chrome version:', navigator.userAgent.match(/Chrome\/([0-9.]+)/)?.[1] || 'Unknown')
+    console.log('User agent:', navigator.userAgent)
+    console.log('navigator.webdriver:', navigator.webdriver)
   })
   
   page.setDefaultTimeout(15000)
