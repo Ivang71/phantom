@@ -9,6 +9,8 @@ nvm install --lts
 npm install -g npm@latest
 npm install --global yarn
 
+sudo apt install node-typescript -y
+
 
 #settings up playwright
 npx --yes playwright install --with-deps
