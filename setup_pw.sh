@@ -1,1 +1,0 @@
-npx playwright install webkit
