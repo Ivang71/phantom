@@ -6,9 +6,6 @@ import { StatsManager } from './stats'
 
 loadEnv()
 
-const PROXY_USER = process.env.PROXY_USER
-const PROXY_PASS = process.env.PROXY_PASS
-const PROXY_HOST = process.env.PROXY_HOST
 const PROXY_PORT_START = 10000
 const PROXY_PORT_END = 20000
 const MAX_ITERATIONS = 1000000000
@@ -221,6 +218,18 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     }
   })
   
+  // Extra diagnostics: log failed requests and HTTP errors
+  page.on('requestfailed', (request) => {
+    const failure = request.failure()
+    logWarn(`[W${workerId}] [REQ FAILED] ${request.url()} - ${failure ? failure.errorText : 'unknown'}`)
+  })
+  page.on('response', (response) => {
+    const status = response.status()
+    if (status >= 400) {
+      logWarn(`[W${workerId}] [HTTP ${status}] ${response.url()}`)
+    }
+  })
+
   // Track network requests for data measurement (excluding cache hits)
   page.on('request', (request) => {
     const url = request.url()
@@ -234,10 +243,15 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     // Check if this will be served from cache
     const willBeCacheHit = CACHED_FILES.includes(url) && fileCache.has(url)
     
-    // Detect successful PopCash redirect
+    // Debug: log when the initial redirect endpoint is hit
     if (url.includes('p.pcdelv.com/go/')) {
+      logInfo(`[W${workerId}] [REDIRECT SEEN] HTTP go endpoint requested: ${url}`)
+    }
+
+    // Detect final PopCash conversion endpoint
+    if (url.includes('p.pcdelv.com/v2/') && url.endsWith('/cl')) {
       wasSuccessful = true
-      logInfo(`[W${workerId}] [SUCCESS] PopCash redirect detected: ${url}`)
+      logInfo(`[W${workerId}] [SUCCESS] Final PopCash endpoint reached: ${url}`)
     }
     
     logDebug(`[W${workerId}] [REQUEST] ${method} ${url}`)
@@ -484,10 +498,10 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       await page.waitForTimeout(500)
       const currentUrl = page.url()
       if (currentUrl !== TARGET_URL) {
-        if (currentUrl.includes('p.pcdelv.com')) {
+        if (currentUrl.includes('p.pcdelv.com/v2/') && currentUrl.endsWith('/cl')) {
           isClosing = true // Set flag to stop processing responses
           wasSuccessful = true
-          logInfo(`[W${workerId}] [SUCCESS] Redirect detected to ${currentUrl}`)
+          logInfo(`[W${workerId}] [SUCCESS] Final endpoint loaded: ${currentUrl}`)
           // Wait for redirect chain to complete
           try {
             await page.waitForLoadState('networkidle', { timeout: 5000 })
@@ -527,10 +541,10 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       await page.waitForTimeout(300)
       const urlAfterEvaluate = page.url()
       if (urlAfterEvaluate !== TARGET_URL) {
-        if (urlAfterEvaluate.includes('p.pcdelv.com')) {
+        if (urlAfterEvaluate.includes('p.pcdelv.com/v2/') && urlAfterEvaluate.endsWith('/cl')) {
           isClosing = true // Set flag to stop processing responses
           wasSuccessful = true
-          logInfo(`[W${workerId}] [SUCCESS] Redirect detected to ${urlAfterEvaluate}`)
+          logInfo(`[W${workerId}] [SUCCESS] Final endpoint loaded: ${urlAfterEvaluate}`)
           // Wait for redirect chain to complete
           try {
             await page.waitForLoadState('networkidle', { timeout: 5000 })

@@ -81,3 +81,33 @@ cat >> "$TMPCONF" << EOF
 acl allowed_domains dstdomain .popcash.net .pcdelv.com $TARGET_DOMAIN api.ipify.org
 
 # Route only whitelisted domains via parents
+acl CONNECT method CONNECT
+acl SSL_ports port 443
+
+# Only allow traffic to whitelisted domains (including CONNECT)
+http_access allow CONNECT allowed_domains
+http_access allow allowed_domains
+http_access deny all
+
+# Force whitelisted domains through parents (no direct)
+never_direct allow allowed_domains
+always_direct deny allowed_domains
+
+# Basic logging
+access_log stdio:/var/log/squid/access.log squid
+cache_log /var/log/squid/cache.log
+
+EOF
+
+echo "Installing squid.conf..."
+sudo mkdir -p /etc/squid
+sudo cp "$TMPCONF" /etc/squid/squid.conf
+sudo rm -f "$TMPCONF"
+
+echo "Restarting Squid..."
+sudo systemctl enable --now squid || true
+sudo systemctl restart squid || true
+echo "Squid status:"
+sudo systemctl --no-pager status squid | sed -n '1,80p' || true
+echo "Recent access log entries (if any):"
+sudo tail -n 50 /var/log/squid/access.log 2>/dev/null || true
