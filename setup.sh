@@ -12,6 +12,14 @@ npm install --global yarn
 sudo apt install node-typescript -y
 
 
+# Configure journald limits
+echo "Configuring journald limits..."
+sudo mkdir -p /etc/systemd/journald.conf.d
+echo -e "[Journal]\nStorage=persistent\nSystemMaxUse=1G\nRuntimeMaxUse=200M\nMaxRetentionSec=7day\nSystemKeepFree=10%" | sudo tee /etc/systemd/journald.conf.d/limits.conf
+sudo mkdir -p /var/log/journal
+sudo systemctl restart systemd-journald
+
+
 #settings up playwright
 npx --yes playwright install --with-deps
 npx --yes playwright install webkit
