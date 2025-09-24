@@ -584,12 +584,6 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     } catch (e) {}
   }
   
-
-  // Proceed straight to clicking without waiting
-  logDebug(`[W${workerId}] [PROCEEDING] Going straight to click actions without waiting for popup`)
-  
-
-  
   try {
     // Close all pages first to prevent stealth plugin errors
     const contexts = browser.contexts()
