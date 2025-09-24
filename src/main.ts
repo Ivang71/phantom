@@ -121,19 +121,35 @@ async function createBrowserWithProxy(proxyPort: number) {
   return await chromium.launch({
     headless: true,
     args: [
-      '--no-first-run', 
+      // === make Chrome shut up ===
+      '--disable-background-networking',
+      '--disable-component-update',
+      '--disable-domain-reliability',
+      '--disable-sync',
+      '--metrics-recording-only',
+      '--no-first-run',
+      '--no-pings',
+      '--safebrowsing-disable-auto-update',
+      '--disable-client-side-phishing-detection',
+      '--disable-default-apps',
+      
+      // === stop remaining traffic before route handler ===
+      '--disable-quic',
+      '--dns-prefetch-disable',
+      '--disable-features=PreconnectToOrigins,PrefetchPrivacyChanges',
+      
+      // === keep the ones you already had ===
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-extensions',
+      '--disable-web-security',
+      '--fast-start',
       '--disable-blink-features=AutomationControlled',
       '--enable-blink-features=IdleDetection',
-      '--fast-start',
-      '--disable-extensions',
-      '--disable-default-apps',
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
       '--disable-renderer-backgrounding',
-      '--disable-web-security',
-      '--disable-features=VizDisplayCompositor',
-      '--no-sandbox',
-      '--disable-setuid-sandbox'
+      '--disable-features=VizDisplayCompositor'
     ],
     ...(proxyConfig && { proxy: proxyConfig })
   })
@@ -184,6 +200,26 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   const targetHostname = new URL(TARGET_URL).hostname
   const ALLOWED_DOMAINS = [targetHostname, 'pcdelv.com', 'popcash.net']
   
+  // === Create CDP session for monitoring (optional) ===
+  // Note: Using page.route() for blocking instead of CDP Network.setBlockedURLs
+  // because CDP blocking is too aggressive and blocks necessary requests
+  let sess: any = null
+  if (CURRENT_LOG_LEVEL >= LogLevel.DEBUG) {
+    try {
+      sess = await context.newCDPSession(page)
+      await sess.send('Network.enable')
+      
+      // Monitor requests for verification (but don't block via CDP)
+      sess.on('Network.requestWillBeSent', (e: any) => {
+        if (!ALLOWED_DOMAINS.some(h => e.request.url.includes(h))) {
+          logDebug(`[W${workerId}] [BACKGROUND REQUEST] ${e.request.url}`)
+        }
+      })
+    } catch (e) {
+      logDebug(`[W${workerId}] [CDP] Could not create CDP session: ${e}`)
+    }
+  }
+  
   const isAllowedDomain = (url: string): boolean => {
     try {
       const hostname = new URL(url).hostname.toLowerCase()
@@ -203,15 +239,24 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       const resourceType = request.resourceType()
       const url = request.url()
       const allowedTypes = ['document', 'script', 'xhr', 'fetch']
+      const blockedTypes = ['image', 'stylesheet', 'font', 'media', 'websocket', 'manifest', 'other']
       
       // Block any domain not in whitelist
       if (!isAllowedDomain(url)) {
-        logDebug(`[W${workerId}] [BLOCKED] Non-whitelisted domain: ${url}`)
+        logDebug(`[W${workerId}] [BLOCKED DOMAIN] ${resourceType}: ${url}`)
+        await route.abort()
+        return
+      }
+      
+      // Block unwanted resource types that cause background traffic
+      if (blockedTypes.includes(resourceType)) {
+        logDebug(`[W${workerId}] [BLOCKED TYPE] ${resourceType}: ${url}`)
         await route.abort()
         return
       }
       
       if (!allowedTypes.includes(resourceType)) {
+        logDebug(`[W${workerId}] [BLOCKED UNKNOWN] ${resourceType}: ${url}`)
         await route.abort()
         return
       }
@@ -318,6 +363,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
             logDebug(`[W${workerId}] [BODY ERROR] Failed to get response body for ${url}: ${bodyError instanceof Error ? bodyError.message : String(bodyError)}`)
             bodySize = 0
             contentType = 'unknown'
+            return
           }
         }
         
