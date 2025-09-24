@@ -9,7 +9,6 @@ loadEnv()
 const PROXY_PORT_START = 10000
 const PROXY_PORT_END = 20000
 const MAX_CONCURRENT_WORKERS = Number(process.env.NUMBER_OF_WORKERS)
-const WORKER_BATCH_SIZE = 500000000
 
 enum LogLevel {
   ERROR = 0,
@@ -105,7 +104,7 @@ async function createBrowserWithProxy(proxyPort: number) {
   const proxyConfig = { server: 'http://127.0.0.1:3128' }
   
   return await chromium.launch({
-    headless: false,
+    headless: true,
     args: [
       // === make Chrome shut up ===
       '--disable-background-networking',
@@ -161,6 +160,27 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   let totalBytesReceived = 0
   let isClosing = false
   let wasSuccessful = false
+
+  async function waitForFinalOnPage(p: any, timeoutMs = 10000): Promise<boolean> {
+    return new Promise((resolve) => {
+      let done = false
+      const onReq = (req: any) => {
+        const u = req.url()
+        if (u.includes('p.pcdelv.com/v2/') && u.endsWith('/cl')) {
+          cleanup(true)
+        }
+      }
+      const timer = setTimeout(() => cleanup(false), timeoutMs)
+      function cleanup(result: boolean) {
+        if (done) return
+        done = true
+        try { p.off('request', onReq) } catch (e) {}
+        clearTimeout(timer)
+        resolve(result)
+      }
+      try { p.on('request', onReq) } catch (e) { cleanup(false) }
+    })
+  }
 
   // Get Chrome version info
   try {
@@ -443,25 +463,32 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         try { await opened.bringToFront() } catch (e) {}
         try { await opened.close() } catch (e) {}
         try { await page.bringToFront() } catch (e) {}
-        // Wait for redirect chain on original
-        try { await page.waitForURL(/p\.pcdelv\.com\/v2\/.*\/cl/, { timeout: 8000 }) ; wasSuccessful = true } catch (e) {}
+        // Wait for redirect chain on original quickly via request observation
+        try { wasSuccessful = await waitForFinalOnPage(page, 7000) } catch (e) {}
+        if (wasSuccessful) {
+          isClosing = true
+          try { await page.waitForLoadState('networkidle', { timeout: 4000 }) } catch (e) {}
+          try { await browser.close() } catch (e) {}
+          return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
+        }
       } else {
         // Case 2: Pop-up - close original, wait on new window
         try { await opened.bringToFront() } catch (e) {}
-        // Prefer waiting for success BEFORE closing original to avoid losing context if pop-up reuses it
-        try { await opened.waitForURL(/p\.pcdelv\.com\/v2\/.*\/cl/, { timeout: 6000 }) ; wasSuccessful = true } catch (e) {}
+        try { wasSuccessful = await waitForFinalOnPage(opened, 7000) } catch (e) {}
+        // Close immediately on success to end session
         try { await page.close() } catch (e) {}
-        // If success reached, close popup quickly; otherwise give it a brief idle wait
-        try { wasSuccessful ? await opened.close() : await opened.waitForLoadState('networkidle', { timeout: 2000 }) } catch (e) {}
-        try { if (!opened.isClosed()) await opened.close() } catch (e) {}
+        try { await opened.waitForLoadState('domcontentloaded', { timeout: 500 }).catch(() => {}) } catch (e) {}
+        try { await browser.close() } catch (e) {}
+        return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
       }
     } else {
       // No new page; check if current navigated
-      const currentUrl = page.url()
-      if (currentUrl.includes('p.pcdelv.com/v2/') && currentUrl.endsWith('/cl')) {
-        wasSuccessful = true
-      } else {
-        try { await page.waitForURL(/p\.pcdelv\.com\/v2\/.*\/cl/, { timeout: 8000 }) ; wasSuccessful = true } catch (e) {}
+      try { wasSuccessful = await waitForFinalOnPage(page, 7000) } catch (e) {}
+      if (wasSuccessful) {
+        isClosing = true
+        try { await page.waitForLoadState('networkidle', { timeout: 1500 }) } catch (e) {}
+        try { await browser.close() } catch (e) {}
+        return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
       }
     }
   }
@@ -513,7 +540,7 @@ let globalCacheHits = 0
 let globalCacheBytesSaved = 0
 let statsManager: StatsManager
 
-async function runWorker(workerId: number, iterationsToRun: number): Promise<void> {
+async function runWorker(workerId: number): Promise<void> {
   const stats: WorkerStats = {
     workerId,
     iterations: 0,
@@ -524,9 +551,9 @@ async function runWorker(workerId: number, iterationsToRun: number): Promise<voi
   }
   workerStats.set(workerId, stats)
 
-  logInfo(`[W${workerId}] Worker started - will run ${iterationsToRun} iterations`)
+  logInfo(`[W${workerId}] Worker started`)
 
-  for (let i = 0; i < iterationsToRun; i++) {
+  for (;;) {
     const iterationNumber = globalIterationCount++
     const currentProxyPort = PROXY_PORT_START + (iterationNumber % (PROXY_PORT_END - PROXY_PORT_START + 1))
     
@@ -561,12 +588,8 @@ async function runWorker(workerId: number, iterationsToRun: number): Promise<voi
     }
     
     // Small delay between iterations within worker
-    if (i < iterationsToRun - 1) {
-      await new Promise(resolve => setTimeout(resolve, 1000))
-    }
+    await new Promise(resolve => setTimeout(resolve, 1000))
   }
-  
-  logInfo(`[W${workerId}] Worker completed ${stats.iterations} iterations (${stats.errors} errors)`)
 }
 
 async function printStats(): Promise<void> {
@@ -606,7 +629,6 @@ async function main(): Promise<void> {
   logInfo(`Total Memory: ${sysInfo.totalMemory} GB`)
   logInfo(`Free Memory: ${sysInfo.freeMemory} GB`)
   logInfo(`Max Concurrent Workers: ${MAX_CONCURRENT_WORKERS}`)
-  logInfo(`Worker Batch Size: ${WORKER_BATCH_SIZE}`)
   logInfo(`Cached Files: ${CACHED_FILES.length} files configured for caching`)
   
   // Squid-only mode
@@ -623,61 +645,17 @@ async function main(): Promise<void> {
   // Start stats printer
   const statsInterval = setInterval(printStats, 15000)
 
-  let totalIterationsRun = 0
-  let batchNumber = 0
+  // Clear previous worker stats
+  workerStats.clear()
 
+  // Start workers independently (no batching)
+  for (let workerId = 0; workerId < MAX_CONCURRENT_WORKERS; workerId++) {
+    runWorker(workerId).catch(err => logError(`[W${workerId}] Worker crashed:`, err))
+  }
+
+  // Keep process alive; stats printer will continue
   while (true) {
-    batchNumber++
-    const iterationsThisBatch = WORKER_BATCH_SIZE * MAX_CONCURRENT_WORKERS
-    const iterationsPerWorker = Math.ceil(iterationsThisBatch / MAX_CONCURRENT_WORKERS)
-    
-    logInfo(`\n=== BATCH ${batchNumber} ===`)
-    logInfo(`Running ${iterationsThisBatch} iterations across ${MAX_CONCURRENT_WORKERS} workers`)
-    logInfo(`${iterationsPerWorker} iterations per worker`)
-    logInfo('==================\n')
-
-    // Clear previous worker stats
-    workerStats.clear()
-    
-    // Create and start workers
-    const workerPromises: Promise<void>[] = []
-    for (let workerId = 0; workerId < MAX_CONCURRENT_WORKERS; workerId++) {
-      workerPromises.push(runWorker(workerId, iterationsPerWorker))
-    }
-    
-    // Wait for all workers to complete
-    await Promise.all(workerPromises)
-    
-    totalIterationsRun += iterationsThisBatch
-    logInfo(`\n=== BATCH ${batchNumber} COMPLETED ===`)
-    logInfo(`Total iterations completed: ${totalIterationsRun}`)
-    await printStats()
-    
-    // Break between batches for cleanup
-    logInfo('Waiting 5s before next batch...')
-    await new Promise(resolve => setTimeout(resolve, 5000))
-  }
-
-  clearInterval(statsInterval)
-  
-  logInfo('\n=== ALL BATCHES COMPLETED ===')
-  await printStats()
-  
-  // Show cache statistics
-  logInfo('\n=== Cache Statistics ===')
-  logInfo(`Cached Files: ${fileCache.size}`)
-  let totalCacheSize = 0
-  for (const [url, cached] of fileCache.entries()) {
-    const size = cached.content.length
-    totalCacheSize += size
-    logInfo(`  ${url}: ${formatBytes(size)}`)
-  }
-  logInfo(`Total Cache Size: ${formatBytes(totalCacheSize)}`)
-  logInfo('=========================')
-  
-  // Cleanup stats manager
-  if (statsManager) {
-    statsManager.cleanup()
+    await new Promise(resolve => setTimeout(resolve, 60000))
   }
 }
 
