@@ -17,7 +17,8 @@ enum LogLevel {
   DEBUG = 3
 }
 
-const CURRENT_LOG_LEVEL = LogLevel.DEBUG
+const LOG_MODE = (process.env.LOG_MODE === 'prod') ? 'prod' : 'debug'
+const CURRENT_LOG_LEVEL = LOG_MODE === 'debug' ? LogLevel.DEBUG : LogLevel.ERROR
 
 function log(level: LogLevel, message: string, ...args: any[]): void {
   if (level <= CURRENT_LOG_LEVEL) {
@@ -174,7 +175,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       }
       throw new Error('Geo lookup failed')
     } finally {
-      try { await tmp.close() } catch (e) {}
+      try { tmp.close() } catch (e) {}
     }
   }
 
@@ -339,7 +340,11 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     // Detect final PopCash conversion endpoint
     if (url.includes('p.pcdelv.com/v2/') && url.endsWith('/cl')) {
       wasSuccessful = true
-      logInfo(`[W${workerId}] [SUCCESS] Final PopCash endpoint reached: ${url}`)
+      if (LOG_MODE === 'prod') {
+        console.log(`[W${workerId}] SUCCESS ${url}`)
+      } else {
+        logInfo(`[W${workerId}] [SUCCESS] Final PopCash endpoint reached: ${url}`)
+      }
     }
     
     logDebug(`[W${workerId}] [REQUEST] ${method} ${url}`)
@@ -538,7 +543,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         try { wasSuccessful = await waitForFinalOnPage(page, 7000) } catch (e) {}
         if (wasSuccessful) {
           isClosing = true
-          try { await page.waitForLoadState('networkidle', { timeout: 4000 }) } catch (e) {}
+          try { await page.waitForLoadState('networkidle', { timeout: 400 }) } catch (e) {}
           try { await browser.close() } catch (e) {}
           return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
         }
@@ -548,7 +553,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         try { wasSuccessful = await waitForFinalOnPage(opened, 7000) } catch (e) {}
         // Close immediately on success to end session
         try { await page.close() } catch (e) {}
-        try { await opened.waitForLoadState('domcontentloaded', { timeout: 500 }).catch(() => {}) } catch (e) {}
+        try { await opened.waitForLoadState('domcontentloaded', { timeout: 300 }).catch(() => {}) } catch (e) {}
         try { await browser.close() } catch (e) {}
         return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
       }
@@ -557,7 +562,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       try { wasSuccessful = await waitForFinalOnPage(page, 7000) } catch (e) {}
       if (wasSuccessful) {
         isClosing = true
-        try { await page.waitForLoadState('networkidle', { timeout: 1500 }) } catch (e) {}
+        try { await page.waitForLoadState('networkidle', { timeout: 300 }) } catch (e) {}
         try { await browser.close() } catch (e) {}
         return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
       }
@@ -582,6 +587,10 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     }
     await browser.close()
   } catch (e) {}
+  
+  if (!wasSuccessful && LOG_MODE === 'prod') {
+    console.log(`[W${workerId}] FAIL`)
+  }
   
   return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
 }

@@ -4,8 +4,8 @@
   "main": "src/main.ts",
   "license": "MIT",
   "scripts": {
-    "start": "ts-node src/main.ts",
-    "prod": "tsc && node dist/main.js"
+    "dev": "export LOG_MODE=debug && ts-node src/main.ts",
+    "prod": "export LOG_MODE=prod && tsc && node dist/main.js"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
