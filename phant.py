@@ -22,7 +22,7 @@ chain = []
 
 while True:
     print(f"=> GET {url}")
-    resp = session.get(url, timeout=20)
+    resp = session.get(url, timeout=5, allow_redirects=False)
     loc = resp.headers.get('location') or resp.headers.get('Location')
     ctype = resp.headers.get('content-type') or resp.headers.get('Content-Type')
     print(f"<= {resp.status_code} {resp.url} len={len(resp.content)} ct={ctype or '-'}{f' loc={loc}' if loc else ''}")
