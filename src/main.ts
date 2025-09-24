@@ -8,7 +8,6 @@ loadEnv()
 
 const PROXY_PORT_START = 10000
 const PROXY_PORT_END = 20000
-const MAX_ITERATIONS = 1000000000
 const MAX_CONCURRENT_WORKERS = Number(process.env.NUMBER_OF_WORKERS)
 const WORKER_BATCH_SIZE = 500000000
 
@@ -103,12 +102,10 @@ function getSystemInfo() {
 }
 
 async function createBrowserWithProxy(proxyPort: number) {
-  const proxyConfig = {
-    server: 'http://127.0.0.1:3128'
-  }
+  const proxyConfig = { server: 'http://127.0.0.1:3128' }
   
   return await chromium.launch({
-    headless: true,
+    headless: false,
     args: [
       // === make Chrome shut up ===
       '--disable-background-networking',
@@ -326,13 +323,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   })
   
   context.on('page', async (newPage) => {
-    setTimeout(async () => {
-      try {
-        if (!newPage.isClosed()) {
-          await newPage.close()
-        }
-      } catch (e) {}
-    }, 500)
+    logDebug(`[W${workerId}] [NEW PAGE] Opened: ${newPage.url()}`)
   })
   
   await page.addInitScript(() => {
@@ -385,88 +376,37 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   
   if (page.isClosed()) return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
 
-  // Force trigger PopCash events in case content is cached
+  // Minimal trigger; show.js will mount the div itself
   try {
     await page.evaluate(() => {
-      // Trigger common popup events
       window.dispatchEvent(new Event('load'))
-      window.dispatchEvent(new Event('DOMContentLoaded'))
-      document.dispatchEvent(new Event('readystatechange'))
-      
-      // Try to trigger PopCash if it exists
-      if (typeof (window as any).popunder !== 'undefined') {
-        try { (window as any).popunder() } catch(e) {}
-      }
-      if (typeof (window as any).popcash !== 'undefined') {
-        try { (window as any).popcash() } catch(e) {}
-      }
     })
   } catch (e) {}
 
-  let targetDiv = null
-  try {
-    const divs = await page.$$('div')
-    
-    for (const div of divs) {
+  /*
+    Real on-page flow (observed):
+    - Page loads from cache in <1s; show.js is fetched and executed.
+    - A probe to https://dcba.popcash.net/znWaa3gu fires; ignore it.
+    - The ad div injected by show.js mounts ~1.5s after load and it always mounts.
+    - No need for scroll/wheel/hover spam; just click the mounted div.
+
+    Click outcomes:
+    1) Pop-under: a new tab with the same TARGET_URL gets focus while the original tab enters the redirect chain.
+       Action: close the new tab and wait for the redirect chain to finish on the original tab.
+    2) Pop-up: a new window opens and starts the redirect chain; it becomes focused.
+       Action: close the original TARGET_URL page and wait for the redirect chain to finish in the new window.
+  */
+  // Wait for guaranteed mount (~1.5s); then query for high z-index/fixed div
+  await page.waitForTimeout(1500)
+  let targetDiv = await page.$('div[style*="z-index:9999999"], div[style*="position:fixed"][style*="z-index"]')
+  if (!targetDiv) {
+    const candidates = await page.$$('div')
+    for (const div of candidates) {
       const style = await div.getAttribute('style')
       if (style && style.includes('z-index') && (style.includes('9999999') || style.includes('position:fixed'))) {
         targetDiv = div
         break
       }
-    }
-  } catch (e) {
-    return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
-  }
-  
-  if (!targetDiv) {
-    const triggerActions = [
-      () => page.click('body'),
-      () => page.mouse.move(500, 500),
-      () => page.mouse.wheel(0, 100),
-      () => page.keyboard.press('Space'),
-      () => page.hover('a[href="/"]'),
-      () => page.evaluate(() => window.scrollTo(0, 100)),
-      () => page.mouse.click(100, 100),
-      () => page.mouse.click(800, 400),
-      () => page.keyboard.press('Tab'),
-      () => page.evaluate(() => window.dispatchEvent(new Event('scroll')))
-    ]
-    
-    // More attempts with longer waits for cached content
-    for (let attempt = 0; attempt < 15; attempt++) {
-      const action = triggerActions[attempt % triggerActions.length]
-      try { await action() } catch (e) {}
-      await page.waitForTimeout(3000) // Longer wait for cached content
-      
-      try {
-        const newDivs = await page.$$('div')
-        for (const div of newDivs) {
-          const style = await div.getAttribute('style')
-          if (style && style.includes('z-index') && (style.includes('9999999') || style.includes('position:fixed'))) {
-            targetDiv = div
-            break
-          }
-        }
-      } catch (e) {
-        break
-      }
-      
-      if (targetDiv || page.url() !== TARGET_URL) break
-    }
-  }
-  
-  if (!targetDiv) {
-    for (let i = 0; i < 30; i++) {
-      await page.waitForTimeout(1000)
-      if (page.url() !== TARGET_URL) break
-    }
-    if (page.url() === TARGET_URL) {
-      try {
-        await page.close()
-        await context.close()
-        await browser.close()
-      } catch (e) {}
-      return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
     }
   }
   
@@ -482,116 +422,48 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       }
     } catch (e) {}
     
+    await page.waitForTimeout(300)
+    const pagesBefore = context.pages()
+    // Single decisive click
+    try { await targetDiv.click({ force: true }) } catch (e) {}
     await page.waitForTimeout(500)
     
-    for (let i = 0; i < 5; i++) {
-      if (page.isClosed() || page.url() !== TARGET_URL) break
-      
-      try { 
-        if (!page.isClosed()) {
-          await targetDiv.click({ force: true }) 
-        }
-      } catch (e) {}
-      
-      // Check for URL change after click
-      await page.waitForTimeout(500)
+    // Detect outcome
+    // Small grace period for popups/tabs to appear
+    await page.waitForTimeout(700)
+    const pagesAfter = context.pages()
+    const opened = pagesAfter.find(p => !pagesBefore.includes(p))
+    
+    if (opened) {
+      // New tab/window opened
+      const openedUrl = opened.url()
+      const openedIsSameTarget = openedUrl === TARGET_URL || openedUrl === 'about:blank'
+      if (openedIsSameTarget) {
+        // Case 1: Pop-under - close new tab, wait on original
+        try { await opened.bringToFront() } catch (e) {}
+        try { await opened.close() } catch (e) {}
+        try { await page.bringToFront() } catch (e) {}
+        // Wait for redirect chain on original
+        try { await page.waitForURL(/p\.pcdelv\.com\/v2\/.*\/cl/, { timeout: 8000 }) ; wasSuccessful = true } catch (e) {}
+      } else {
+        // Case 2: Pop-up - close original, wait on new window
+        try { await opened.bringToFront() } catch (e) {}
+        // Prefer waiting for success BEFORE closing original to avoid losing context if pop-up reuses it
+        try { await opened.waitForURL(/p\.pcdelv\.com\/v2\/.*\/cl/, { timeout: 6000 }) ; wasSuccessful = true } catch (e) {}
+        try { await page.close() } catch (e) {}
+        // If success reached, close popup quickly; otherwise give it a brief idle wait
+        try { wasSuccessful ? await opened.close() : await opened.waitForLoadState('networkidle', { timeout: 2000 }) } catch (e) {}
+        try { if (!opened.isClosed()) await opened.close() } catch (e) {}
+      }
+    } else {
+      // No new page; check if current navigated
       const currentUrl = page.url()
-      if (currentUrl !== TARGET_URL) {
-        if (currentUrl.includes('p.pcdelv.com/v2/') && currentUrl.endsWith('/cl')) {
-          isClosing = true // Set flag to stop processing responses
-          wasSuccessful = true
-          logInfo(`[W${workerId}] [SUCCESS] Final endpoint loaded: ${currentUrl}`)
-          // Wait for redirect chain to complete
-          try {
-            await page.waitForLoadState('networkidle', { timeout: 5000 })
-          } catch (e) {}
-          
-          // Close cleanly
-          try {
-            await page.close()
-            await context.close()
-            await browser.close()
-          } catch (e) {}
-          return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
-        }
-        break
+      if (currentUrl.includes('p.pcdelv.com/v2/') && currentUrl.endsWith('/cl')) {
+        wasSuccessful = true
+      } else {
+        try { await page.waitForURL(/p\.pcdelv\.com\/v2\/.*\/cl/, { timeout: 8000 }) ; wasSuccessful = true } catch (e) {}
       }
-      
-      try {
-        if (!page.isClosed() && page.url() === TARGET_URL) {
-          await page.evaluate((element) => {
-            const div = element as HTMLElement
-            div.click()
-            const events = ['mousedown', 'mouseup', 'click', 'pointerdown', 'pointerup']
-            events.forEach(eventType => {
-              div.dispatchEvent(new MouseEvent(eventType, {
-                view: window,
-                bubbles: true,
-                cancelable: true,
-                clientX: 100,
-                clientY: 100
-              }))
-            })
-          }, targetDiv)
-        }
-      } catch (e) {}
-      
-      // Check for URL change after evaluate
-      await page.waitForTimeout(300)
-      const urlAfterEvaluate = page.url()
-      if (urlAfterEvaluate !== TARGET_URL) {
-        if (urlAfterEvaluate.includes('p.pcdelv.com/v2/') && urlAfterEvaluate.endsWith('/cl')) {
-          isClosing = true // Set flag to stop processing responses
-          wasSuccessful = true
-          logInfo(`[W${workerId}] [SUCCESS] Final endpoint loaded: ${urlAfterEvaluate}`)
-          // Wait for redirect chain to complete
-          try {
-            await page.waitForLoadState('networkidle', { timeout: 5000 })
-          } catch (e) {}
-          
-          // Close cleanly
-          try {
-            await page.close()
-            await context.close()
-            await browser.close()
-          } catch (e) {}
-          return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
-        }
-        break
-      }
-      
-      try {
-        if (targetDiv && !page.isClosed()) {
-          const box = await targetDiv.boundingBox()
-          if (box) {
-            await page.mouse.click(box.x + box.width/2, box.y + box.height/2)
-          }
-        }
-      } catch (e) {}
-      
-      await page.waitForTimeout(800)
-      if (page.url() !== TARGET_URL) break
     }
-    
-    try {
-      if (!page.isClosed() && page.url() === TARGET_URL) {
-        await page.waitForSelector('div[style*="z-index:9999999"]', { state: 'visible', timeout: 5000 })
-        const visibleDiv = await page.$('div[style*="z-index:9999999"]')
-        if (visibleDiv && !page.isClosed()) {
-          await visibleDiv.click()
-          await page.waitForTimeout(2000)
-        }
-      }
-    } catch (e) {}
-    
-    try {
-      if (!page.isClosed()) {
-        await page.click('body')
-        await page.keyboard.press('Space')
-        await page.mouse.wheel(0, 500)
-        await page.waitForTimeout(600)
-      }
-    } catch (e) {}
   }
   
   try {
@@ -754,10 +626,9 @@ async function main(): Promise<void> {
   let totalIterationsRun = 0
   let batchNumber = 0
 
-  while (totalIterationsRun < MAX_ITERATIONS) {
+  while (true) {
     batchNumber++
-    const remainingIterations = MAX_ITERATIONS - totalIterationsRun
-    const iterationsThisBatch = Math.min(remainingIterations, WORKER_BATCH_SIZE * MAX_CONCURRENT_WORKERS)
+    const iterationsThisBatch = WORKER_BATCH_SIZE * MAX_CONCURRENT_WORKERS
     const iterationsPerWorker = Math.ceil(iterationsThisBatch / MAX_CONCURRENT_WORKERS)
     
     logInfo(`\n=== BATCH ${batchNumber} ===`)
@@ -771,26 +642,20 @@ async function main(): Promise<void> {
     // Create and start workers
     const workerPromises: Promise<void>[] = []
     for (let workerId = 0; workerId < MAX_CONCURRENT_WORKERS; workerId++) {
-      const actualIterations = Math.min(iterationsPerWorker, remainingIterations - (workerId * iterationsPerWorker))
-      if (actualIterations > 0) {
-        workerPromises.push(runWorker(workerId, actualIterations))
-      }
+      workerPromises.push(runWorker(workerId, iterationsPerWorker))
     }
     
     // Wait for all workers to complete
     await Promise.all(workerPromises)
     
     totalIterationsRun += iterationsThisBatch
-    
     logInfo(`\n=== BATCH ${batchNumber} COMPLETED ===`)
-    logInfo(`Total iterations completed: ${totalIterationsRun}/${MAX_ITERATIONS}`)
+    logInfo(`Total iterations completed: ${totalIterationsRun}`)
     await printStats()
     
     // Break between batches for cleanup
-    if (totalIterationsRun < MAX_ITERATIONS) {
-      logInfo('Waiting 5s before next batch...')
-      await new Promise(resolve => setTimeout(resolve, 5000))
-    }
+    logInfo('Waiting 5s before next batch...')
+    await new Promise(resolve => setTimeout(resolve, 5000))
   }
 
   clearInterval(statsInterval)
