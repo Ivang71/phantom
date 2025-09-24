@@ -10,7 +10,7 @@ class RnetBrowser:
         else:
             os.environ.pop('HTTP_PROXY', None)
             os.environ.pop('HTTPS_PROXY', None)
-        self.client = RnetClient(emulation=RnetEmulation.Chrome124)
+        self.client = RnetClient(emulation=RnetEmulation.Chrome137)
 
     async def get(self, url: str, headers: dict, timeout: int = 10) -> dict:
         h = dict(headers)

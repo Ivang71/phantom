@@ -10,7 +10,7 @@ from route.popcash import build_go, next_url_from
 TARGET = os.environ.get("TARGET_URL", "https://eus.lat/")
 UID = os.environ.get("POP_UID", "495017")
 WID = os.environ.get("POP_WID", "746000")
-UA  = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+UA  = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36'
 
 async def run_port(port: int):
     proxy = None

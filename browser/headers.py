@@ -5,7 +5,7 @@ def chrome_nav_headers(referer: str, site: str) -> dict:
         'Accept-Encoding': 'gzip, deflate, br, zstd',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
-        'sec-ch-ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Google Chrome";v="140"',
+        'sec-ch-ua': '"Chromium";v="137", "Not)A;Brand";v="24", "Google Chrome";v="137"',
         'sec-ch-ua-mobile': '?0',
         'sec-ch-ua-platform': '"Windows"',
         'sec-fetch-dest': 'document',
