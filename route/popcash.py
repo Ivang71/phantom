@@ -10,7 +10,7 @@ def build_go(target: str, uid: str, wid: str) -> str:
     import base64
     b64 = base64.b64encode(esc.encode()).decode()
     cb  = f"{int(time.time()*1000)}.{random.randint(0,1_000_000)}"
-    return f"http://p.pcdelv.com/go/{uid}/{wid}/{b64}?cb={cb}"
+    return f"https://p.pcdelv.com/go/{uid}/{wid}/{b64}?cb={cb}"
 
 def next_url_from(resp_url: str, headers: dict, text: str) -> str | None:
     loc = headers.get('location') or headers.get('Location')

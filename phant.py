@@ -4,13 +4,14 @@ import urllib.parse as u
 from urllib.parse import urlparse
 
 from net.client import RnetBrowser
-from browser.headers import chrome_nav_headers, chrome_script_headers
+from browser.headers import chrome_nav_headers, chrome_script_headers, chrome_xhr_headers
 from route.popcash import build_go, next_url_from, extract_probe
 
+PUBLISHER = os.environ.get("PUBLISHER_URL", "https://globalstreaming.lol/")
 TARGET = os.environ.get("TARGET_URL", "https://eus.lat/")
 UID = os.environ.get("POP_UID", "495017")
 WID = os.environ.get("POP_WID", "746000")
-UA  = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36'
+UA  = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
 
 async def run_port(port: int):
     proxy = None
@@ -24,16 +25,32 @@ async def run_port(port: int):
     b = RnetBrowser(UA, proxy)
 
     # optional: script load (behavioural signal)
-    sh = chrome_script_headers(TARGET)
+    sh = chrome_script_headers(PUBLISHER)
     print(f"=> GET https://cdn.popcash.net/show.js")
     _ = await b.get("https://cdn.popcash.net/show.js", sh, timeout=8)
 
-    url = build_go(TARGET, UID, WID)
+    # optional: pre-flight probe as XHR like the tag
+    try:
+        pub = urlparse(PUBLISHER)
+        origin = f"{pub.scheme}://{pub.netloc}"
+        xh = chrome_xhr_headers(PUBLISHER, origin, 'cross-site')
+        print(f"=> GET https://dcba.popcash.net/znWaa3gu")
+        _ = await b.get("https://dcba.popcash.net/znWaa3gu", xh, timeout=5)
+    except Exception:
+        pass
+
+    url = build_go(PUBLISHER, UID, WID)
     chain = []
-    referer = TARGET
+    referer = PUBLISHER
 
     while True:
-        h = chrome_nav_headers(referer, 'cross-site') if referer == TARGET else chrome_nav_headers(referer, 'same-origin')
+        try:
+            cur_host = urlparse(url).netloc
+            ref_host = urlparse(referer).netloc
+            site_ctx = 'same-origin' if cur_host == ref_host else 'cross-site'
+        except Exception:
+            site_ctx = 'cross-site'
+        h = chrome_nav_headers(referer, site_ctx)
         print(f"=> GET {url}")
         r = await b.get(url, h, timeout=10)
         loc = r['headers'].get('location') or r['headers'].get('Location')
