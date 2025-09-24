@@ -108,7 +108,7 @@ async function createBrowserWithProxy(proxyPort: number) {
   }
   
   return await chromium.launch({
-    headless: true,
+    headless: false,
     args: [
       // === make Chrome shut up ===
       '--disable-background-networking',
@@ -372,8 +372,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   page.setDefaultNavigationTimeout(15000)
 
   try {
-    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 15000 })
-    await page.waitForTimeout(2000)
+    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 7000 })
   } catch (e) {
     logWarn(`[W${workerId}] [TIMEOUT] Page load timeout or error: ${e instanceof Error ? e.message : String(e)}`)
     try {
@@ -588,11 +587,8 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     try {
       if (!page.isClosed()) {
         await page.click('body')
-        await page.waitForTimeout(1000)
         await page.keyboard.press('Space')
-        await page.waitForTimeout(1000)
         await page.mouse.wheel(0, 500)
-        await page.waitForTimeout(2000)
         await page.waitForTimeout(600)
       }
     } catch (e) {}
