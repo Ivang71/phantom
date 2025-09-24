@@ -1,5 +1,4 @@
 import { chromium } from 'playwright-extra'
-// Removed stealth plugin - causing too many errors with page creation
 const UserAgent = require('user-agents')
 import { config as loadEnv } from 'dotenv'
 import * as os from 'os'
@@ -106,9 +105,30 @@ function getSystemInfo() {
   }
 }
 
+async function isSquidRunning(): Promise<boolean> {
+  try {
+    const response = await fetch('http://127.0.0.1:3128', { 
+      method: 'GET',
+      signal: AbortSignal.timeout(1000)
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function createBrowserWithProxy(proxyPort: number) {
   let proxyConfig: any = undefined
-  if (PROXY_HOST && proxyPort) {
+  
+  // Check if Squid is running and use it if available
+  const squidAvailable = await isSquidRunning()
+  
+  if (squidAvailable) {
+    proxyConfig = {
+      server: 'http://127.0.0.1:3128'
+    }
+    logDebug(`Using Squid proxy: http://127.0.0.1:3128`)
+  } else if (PROXY_HOST && proxyPort) {
     proxyConfig = {
       server: `http://${PROXY_HOST}:${proxyPort}`,
       ...(PROXY_USER && PROXY_PASS && {
@@ -116,6 +136,7 @@ async function createBrowserWithProxy(proxyPort: number) {
         password: PROXY_PASS
       })
     }
+    logDebug(`Using direct proxy: http://${PROXY_HOST}:${proxyPort}`)
   }
   
   return await chromium.launch({
@@ -821,6 +842,15 @@ async function main(): Promise<void> {
   logInfo(`Max Concurrent Workers: ${MAX_CONCURRENT_WORKERS}`)
   logInfo(`Worker Batch Size: ${WORKER_BATCH_SIZE}`)
   logInfo(`Cached Files: ${CACHED_FILES.length} files configured for caching`)
+  
+  // Check proxy configuration
+  const squidAvailable = await isSquidRunning()
+  if (squidAvailable) {
+    logInfo(`Proxy Mode: Squid (127.0.0.1:3128) → ${PROXY_HOST}`)
+  } else {
+    logInfo(`Proxy Mode: Direct (${PROXY_HOST}:${PROXY_PORT_START}-${PROXY_PORT_END})`)
+    logInfo(`Note: Run ./scripts/squid-setup.sh to enable cost-saving proxy filtering`)
+  }
   logInfo('============================\n')
   
   // Preload cache before starting workers
