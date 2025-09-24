@@ -132,6 +132,7 @@ async function createBrowserWithProxy(proxyPort: number) {
       '--safebrowsing-disable-auto-update',
       '--disable-client-side-phishing-detection',
       '--disable-default-apps',
+      '--disable-variations',
       
       // === stop remaining traffic before route handler ===
       '--disable-quic',
@@ -295,6 +296,19 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       } catch (abortError) {}
     }
   })
+  
+  // Redirect sniffer: aggressive route to catch redirect race conditions
+  // This executes before the main route handler for redirected requests
+  await page.route('**/*', async (route) => {
+    const url = route.request().url()
+    if (!isAllowedDomain(url)) {
+      logDebug(`[W${workerId}] [REDIRECT BLOCKED] ${url}`)
+      await route.abort()
+      return
+    }
+    // Let the main route handler process allowed domains
+    await route.fallback()
+  }, { times: 1000000 }) // High priority
   
   // Track network requests for data measurement (excluding cache hits)
   page.on('request', (request) => {
