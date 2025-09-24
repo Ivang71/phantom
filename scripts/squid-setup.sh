@@ -12,7 +12,6 @@ if [[ $EUID -eq 0 ]]; then
    exit 1
 fi
 
-# Hardcoded proxy settings (baked in)
 PROXY_HOST="gw.dataimpulse.com"
 PROXY_USER="eedab598a442742a9299__cr.nz,se,ch,us,gb,ae,ca,fi"
 PROXY_PASS="d7ae1e9450fcc20a"
@@ -160,8 +159,7 @@ echo "✓ Proxy credentials embedded: $PROXY_HOST:$PROXY_PORT"
 echo "✓ Domain filtering active: .popcash.net, .pcdelv.com, $TARGET_DOMAIN"
 echo "✓ Service running on 127.0.0.1:3128"
 echo ""
-echo "Your bot will now automatically use Squid for massive cost savings!"
-echo ""
+
 echo "Commands:"
 echo "  Monitor: sudo tail -f /var/log/squid/cache.log"
 echo "  Status:  sudo systemctl status squid"

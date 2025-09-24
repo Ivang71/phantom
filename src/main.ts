@@ -22,7 +22,7 @@ enum LogLevel {
   DEBUG = 3
 }
 
-const CURRENT_LOG_LEVEL = LogLevel.INFO
+const CURRENT_LOG_LEVEL = LogLevel.DEBUG
 
 function log(level: LogLevel, message: string, ...args: any[]): void {
   if (level <= CURRENT_LOG_LEVEL) {
@@ -105,38 +105,9 @@ function getSystemInfo() {
   }
 }
 
-async function isSquidRunning(): Promise<boolean> {
-  try {
-    const response = await fetch('http://127.0.0.1:3128', { 
-      method: 'GET',
-      signal: AbortSignal.timeout(1000)
-    })
-    return true
-  } catch {
-    return false
-  }
-}
-
 async function createBrowserWithProxy(proxyPort: number) {
-  let proxyConfig: any = undefined
-  
-  // Check if Squid is running and use it if available
-  const squidAvailable = await isSquidRunning()
-  
-  if (squidAvailable) {
-    proxyConfig = {
-      server: 'http://127.0.0.1:3128'
-    }
-    logDebug(`Using Squid proxy: http://127.0.0.1:3128`)
-  } else if (PROXY_HOST && proxyPort) {
-    proxyConfig = {
-      server: `http://${PROXY_HOST}:${proxyPort}`,
-      ...(PROXY_USER && PROXY_PASS && {
-        username: PROXY_USER,
-        password: PROXY_PASS
-      })
-    }
-    logDebug(`Using direct proxy: http://${PROXY_HOST}:${proxyPort}`)
+  const proxyConfig = {
+    server: 'http://127.0.0.1:3128'
   }
   
   return await chromium.launch({
@@ -218,70 +189,10 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
 
   const page = await context.newPage()
   
-  // Whitelist of allowed domains and their subdomains
-  const targetHostname = new URL(TARGET_URL).hostname
-  const ALLOWED_DOMAINS = [targetHostname, 'pcdelv.com', 'popcash.net']
-  
-  // === Create CDP session for monitoring (optional) ===
-  // Note: Using page.route() for blocking instead of CDP Network.setBlockedURLs
-  // because CDP blocking is too aggressive and blocks necessary requests
-  let sess: any = null
-  if (CURRENT_LOG_LEVEL >= LogLevel.DEBUG) {
-    try {
-      sess = await context.newCDPSession(page)
-      await sess.send('Network.enable')
-      
-      // Monitor requests for verification (but don't block via CDP)
-      sess.on('Network.requestWillBeSent', (e: any) => {
-        if (!ALLOWED_DOMAINS.some(h => e.request.url.includes(h))) {
-          logDebug(`[W${workerId}] [BACKGROUND REQUEST] ${e.request.url}`)
-        }
-      })
-    } catch (e) {
-      logDebug(`[W${workerId}] [CDP] Could not create CDP session: ${e}`)
-    }
-  }
-  
-  const isAllowedDomain = (url: string): boolean => {
-    try {
-      const hostname = new URL(url).hostname.toLowerCase()
-      return ALLOWED_DOMAINS.some(domain => 
-        hostname === domain || hostname.endsWith('.' + domain)
-      )
-    } catch {
-      return false
-    }
-  }
-  
-  // Block all domains except whitelisted ones, allow only HTML, JS, and XHR
-  // Also handle caching for specific files
+  // Simple route handler for caching only (Squid handles all filtering)
   await page.route('**/*', async (route) => {
     try {
-      const request = route.request()
-      const resourceType = request.resourceType()
-      const url = request.url()
-      const allowedTypes = ['document', 'script', 'xhr', 'fetch']
-      const blockedTypes = ['image', 'stylesheet', 'font', 'media', 'websocket', 'manifest', 'other']
-      
-      // Block any domain not in whitelist
-      if (!isAllowedDomain(url)) {
-        logDebug(`[W${workerId}] [BLOCKED DOMAIN] ${resourceType}: ${url}`)
-        await route.abort()
-        return
-      }
-      
-      // Block unwanted resource types that cause background traffic
-      if (blockedTypes.includes(resourceType)) {
-        logDebug(`[W${workerId}] [BLOCKED TYPE] ${resourceType}: ${url}`)
-        await route.abort()
-        return
-      }
-      
-      if (!allowedTypes.includes(resourceType)) {
-        logDebug(`[W${workerId}] [BLOCKED UNKNOWN] ${resourceType}: ${url}`)
-        await route.abort()
-        return
-      }
+      const url = route.request().url()
       
       // Check if this file should be served from cache
       if (CACHED_FILES.includes(url)) {
@@ -297,68 +208,47 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
             body: cached.content
           })
           return
-        } else {
-          // Cache miss - file should have been pre-loaded
-          logWarn(`[W${workerId}] [CACHE MISS] ${url} not in pre-loaded cache, allowing network request`)
         }
       }
       
-      // Add timeout for route continuation
-      const continuePromise = route.continue()
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Route timeout')), 10000)
-      )
-      
-      await Promise.race([continuePromise, timeoutPromise])
+      // Let all other requests through (Squid will filter)
+      await route.continue()
     } catch (e) {
       logDebug(`[W${workerId}] [ROUTE ERROR] ${route.request().url()}: ${e instanceof Error ? e.message : String(e)}`)
       try {
-        await route.abort()
-      } catch (abortError) {}
+        await route.continue()
+      } catch (continueError) {}
     }
   })
   
-  // Redirect sniffer: aggressive route to catch redirect race conditions
-  // This executes before the main route handler for redirected requests
-  await page.route('**/*', async (route) => {
-    const url = route.request().url()
-    if (!isAllowedDomain(url)) {
-      logDebug(`[W${workerId}] [REDIRECT BLOCKED] ${url}`)
-      await route.abort()
-      return
-    }
-    // Let the main route handler process allowed domains
-    await route.fallback()
-  }, { times: 1000000 }) // High priority
-  
   // Track network requests for data measurement (excluding cache hits)
   page.on('request', (request) => {
-    const resourceType = request.resourceType()
-    const allowedTypes = ['document', 'script', 'xhr', 'fetch']
+    const url = request.url()
+    const method = request.method()
+    const postData = request.postData()
+    const urlSize = Buffer.byteLength(request.url(), 'utf8')
+    const postSize = postData ? Buffer.byteLength(postData, 'utf8') : 0
+    const headerSize = 200 // estimate
+    const totalSent = urlSize + postSize + headerSize
     
-    // Only count allowed requests
-    if (allowedTypes.includes(resourceType)) {
-      const url = request.url()
-      const method = request.method()
-      const postData = request.postData()
-      const urlSize = Buffer.byteLength(request.url(), 'utf8')
-      const postSize = postData ? Buffer.byteLength(postData, 'utf8') : 0
-      const headerSize = 200 // estimate
-      const totalSent = urlSize + postSize + headerSize
-      
-      // Check if this will be served from cache
-      const willBeCacheHit = CACHED_FILES.includes(url) && fileCache.has(url)
-      
-      logDebug(`[W${workerId}] [REQUEST] ${resourceType.toUpperCase()} ${method} ${url}`)
-      if (postData) {
-        logDebug(`[W${workerId}]   POST Data: ${formatBytes(postSize)}`)
-      }
-      logDebug(`[W${workerId}]   URL: ${formatBytes(urlSize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSent)}${willBeCacheHit ? ' (CACHED - NOT COUNTED)' : ''}`)
-      
-      // Only count actual network requests, not cache hits
-      if (!willBeCacheHit) {
-        totalBytesSent += totalSent
-      }
+    // Check if this will be served from cache
+    const willBeCacheHit = CACHED_FILES.includes(url) && fileCache.has(url)
+    
+    // Detect successful PopCash redirect
+    if (url.includes('p.pcdelv.com/go/')) {
+      wasSuccessful = true
+      logInfo(`[W${workerId}] [SUCCESS] PopCash redirect detected: ${url}`)
+    }
+    
+    logDebug(`[W${workerId}] [REQUEST] ${method} ${url}`)
+    if (postData) {
+      logDebug(`[W${workerId}]   POST Data: ${formatBytes(postSize)}`)
+    }
+    logDebug(`[W${workerId}]   URL: ${formatBytes(urlSize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSent)}${willBeCacheHit ? ' (CACHED - NOT COUNTED)' : ''}`)
+    
+    // Only count actual network requests, not cache hits
+    if (!willBeCacheHit) {
+      totalBytesSent += totalSent
     }
   })
   
@@ -366,32 +256,32 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     if (isClosing) return // Skip processing if browser is closing
     
     try {
-      const resourceType = response.request().resourceType()
-      const allowedTypes = ['document', 'script', 'xhr', 'fetch']
+      const url = response.url()
+      const status = response.status()
+      let bodySize: number
+      let contentType: string
+      let isCacheHit = false
       
-      // Only count allowed responses
-      if (allowedTypes.includes(resourceType)) {
-        const url = response.url()
+      // Check if this was served from pre-loaded cache
+      if (CACHED_FILES.includes(url) && fileCache.has(url)) {
+        isCacheHit = true
+        const cached = fileCache.get(url)!
+        bodySize = cached.content.length
+        contentType = cached.contentType
+      } else {
+        // Get response body for network requests (skip redirects)
         const status = response.status()
-        let body: Buffer
-        let bodySize: number
-        let contentType: string
-        let isCacheHit = false
-        
-        // Check if this was served from pre-loaded cache
-        if (CACHED_FILES.includes(url) && fileCache.has(url)) {
-          isCacheHit = true
-          const cached = fileCache.get(url)!
-          bodySize = cached.content.length
-          contentType = cached.contentType
+        if (status >= 300 && status < 400) {
+          // Redirect response - body is unavailable
+          bodySize = 0
+          contentType = response.headers()['content-type'] || 'redirect'
         } else {
-          // Get response body for network requests
           try {
             const bodyPromise = response.body()
             const timeoutPromise = new Promise<Buffer>((_, reject) => 
               setTimeout(() => reject(new Error('Response body timeout')), 10000)
             )
-            body = await Promise.race([bodyPromise, timeoutPromise])
+            const body = await Promise.race([bodyPromise, timeoutPromise])
             bodySize = body.length
             contentType = response.headers()['content-type'] || 'unknown'
           } catch (bodyError) {
@@ -401,18 +291,18 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
             return
           }
         }
-        
-        const headerSize = 500 // estimate
-        const totalSize = bodySize + headerSize
-        
-        logDebug(`[W${workerId}] [RESPONSE] ${resourceType.toUpperCase()} ${status} ${url}`)
-        logDebug(`[W${workerId}]   Content-Type: ${contentType}`)
-        logDebug(`[W${workerId}]   Body: ${formatBytes(bodySize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSize)}${isCacheHit ? ' (CACHED - NOT COUNTED)' : ''}`)
-        
-        // Only count actual network responses, not cache hits
-        if (!isCacheHit) {
-          totalBytesReceived += totalSize
-        }
+      }
+      
+      const headerSize = 500 // estimate
+      const totalSize = bodySize + headerSize
+      
+      logDebug(`[W${workerId}] [RESPONSE] ${status} ${url}`)
+      logDebug(`[W${workerId}]   Content-Type: ${contentType}`)
+      logDebug(`[W${workerId}]   Body: ${formatBytes(bodySize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSize)}${isCacheHit ? ' (CACHED - NOT COUNTED)' : ''}`)
+      
+      // Only count actual network responses, not cache hits
+      if (!isCacheHit) {
+        totalBytesReceived += totalSize
       }
     } catch (e) {
       if (!isClosing) {
@@ -843,14 +733,9 @@ async function main(): Promise<void> {
   logInfo(`Worker Batch Size: ${WORKER_BATCH_SIZE}`)
   logInfo(`Cached Files: ${CACHED_FILES.length} files configured for caching`)
   
-  // Check proxy configuration
-  const squidAvailable = await isSquidRunning()
-  if (squidAvailable) {
-    logInfo(`Proxy Mode: Squid (127.0.0.1:3128) → ${PROXY_HOST}`)
-  } else {
-    logInfo(`Proxy Mode: Direct (${PROXY_HOST}:${PROXY_PORT_START}-${PROXY_PORT_END})`)
-    logInfo(`Note: Run ./scripts/squid-setup.sh to enable cost-saving proxy filtering`)
-  }
+  // Squid-only mode
+  logInfo(`Proxy Mode: Squid-Only (127.0.0.1:3128)`)
+  logInfo(`Cost Savings: All traffic filtered through Squid before reaching proxy`)
   logInfo('============================\n')
   
   // Preload cache before starting workers
