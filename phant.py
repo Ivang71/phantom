@@ -25,23 +25,23 @@ async def run_port(port: int):
     b = RnetBrowser(UA, proxy)
 
     # optional: script load (behavioural signal)
-    sh = chrome_script_headers(PUBLISHER)
+    sh = chrome_script_headers(TARGET)
     print(f"=> GET https://cdn.popcash.net/show.js")
     _ = await b.get("https://cdn.popcash.net/show.js", sh, timeout=8)
 
     # optional: pre-flight probe as XHR like the tag
     try:
-        pub = urlparse(PUBLISHER)
-        origin = f"{pub.scheme}://{pub.netloc}"
-        xh = chrome_xhr_headers(PUBLISHER, origin, 'cross-site')
+        tgt = urlparse(TARGET)
+        origin = f"{tgt.scheme}://{tgt.netloc}"
+        xh = chrome_xhr_headers(TARGET, origin, 'cross-site')
         print(f"=> GET https://dcba.popcash.net/znWaa3gu")
         _ = await b.get("https://dcba.popcash.net/znWaa3gu", xh, timeout=5)
     except Exception:
         pass
 
-    url = build_go(PUBLISHER, UID, WID)
+    url = build_go(TARGET, UID, WID)
     chain = []
-    referer = PUBLISHER
+    referer = TARGET
 
     while True:
         try:
