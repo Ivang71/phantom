@@ -30,5 +30,5 @@ npx --yes playwright install webkit
 
 
 # setting up squid
-chmod +x ./scripts/squid-setup.sh
-./scripts/squid-setup.sh
+# chmod +x ./scripts/squid-setup.sh
+# ./scripts/squid-setup.sh
