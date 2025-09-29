@@ -9,6 +9,10 @@ loadEnv()
 const PROXY_PORT_START = 10000
 const PROXY_PORT_END = 20000
 const MAX_CONCURRENT_WORKERS = Number(process.env.NUMBER_OF_WORKERS)
+const PROXY_HOST = process.env.PROXY_HOST as string
+const PROXY_PORT = Number(process.env.PROXY_PORT)
+const PROXY_USER = process.env.PROXY_USER as string
+const PROXY_PASS = process.env.PROXY_PASS as string
 
 enum LogLevel {
   ERROR = 0,
@@ -102,7 +106,11 @@ function getSystemInfo() {
 }
 
 async function createBrowserWithProxy(proxyPort: number) {
-  const proxyConfig = { server: 'http://127.0.0.1:3128' }
+  const proxyConfig = {
+    server: `http://${PROXY_HOST}:${PROXY_PORT}`,
+    username: PROXY_USER,
+    password: PROXY_PASS
+  }
   
   return await chromium.launch({
     headless: true,
@@ -275,7 +283,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
 
   const page = await context.newPage()
   
-  // Simple route handler for caching only (Squid handles all filtering)
+  // Simple route handler for caching only
   await page.route('**/*', async (route) => {
     try {
       const url = route.request().url()
@@ -297,7 +305,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         }
       }
       
-      // Let all other requests through (Squid will filter)
+      // Let all other requests through
       await route.continue()
     } catch (e) {
       logDebug(`[W${workerId}] [ROUTE ERROR] ${route.request().url()}: ${e instanceof Error ? e.message : String(e)}`)
@@ -711,9 +719,7 @@ async function main(): Promise<void> {
   logInfo(`Max Concurrent Workers: ${MAX_CONCURRENT_WORKERS}`)
   logInfo(`Cached Files: ${CACHED_FILES.length} files configured for caching`)
   
-  // Squid-only mode
-  logInfo(`Proxy Mode: Squid-Only (127.0.0.1:3128)`)
-  logInfo(`Cost Savings: All traffic filtered through Squid before reaching proxy`)
+  logInfo(`Proxy Mode: DataImpulse (${PROXY_HOST}:${PROXY_PORT})`)
   logInfo('============================\n')
   
   // Preload cache before starting workers
