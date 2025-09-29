@@ -3,6 +3,7 @@ const UserAgent = require('user-agents')
 import { config as loadEnv } from 'dotenv'
 import * as os from 'os'
 import { StatsManager } from './stats'
+const { ProxyAgent, setGlobalDispatcher } = require('undici')
 
 loadEnv()
 
@@ -13,6 +14,8 @@ const PROXY_HOST = process.env.PROXY_HOST as string
 const PROXY_PORT = Number(process.env.PROXY_PORT)
 const PROXY_USER = process.env.PROXY_USER as string
 const PROXY_PASS = process.env.PROXY_PASS as string
+const MAX_ITERATIONS = 1000000000
+const WORKER_BATCH_SIZE = 500000000
 
 enum LogLevel {
   ERROR = 0,
@@ -107,7 +110,7 @@ function getSystemInfo() {
 
 async function createBrowserWithProxy(proxyPort: number) {
   const proxyConfig = {
-    server: `http://${PROXY_HOST}:${PROXY_PORT}`,
+    server: `http://${PROXY_HOST}:${proxyPort}`,
     username: PROXY_USER,
     password: PROXY_PASS
   }
@@ -286,7 +289,14 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   // Simple route handler for caching only
   await page.route('**/*', async (route) => {
     try {
-      const url = route.request().url()
+      const request = route.request()
+      const resourceType = request.resourceType()
+      const blockedTypes = ['image', 'stylesheet', 'font', 'media', 'websocket', 'manifest', 'other']
+      if (blockedTypes.includes(resourceType)) {
+        await route.abort()
+        return
+      }
+      const url = request.url()
       
       // Check if this file should be served from cache
       if (CACHED_FILES.includes(url)) {
@@ -628,7 +638,7 @@ let globalCacheHits = 0
 let globalCacheBytesSaved = 0
 let statsManager: StatsManager
 
-async function runWorker(workerId: number): Promise<void> {
+async function runWorker(workerId: number, iterationsToRun: number): Promise<void> {
   const stats: WorkerStats = {
     workerId,
     iterations: 0,
@@ -639,9 +649,9 @@ async function runWorker(workerId: number): Promise<void> {
   }
   workerStats.set(workerId, stats)
 
-  logInfo(`[W${workerId}] Worker started`)
+  logInfo(`[W${workerId}] Worker started - will run ${iterationsToRun} iterations`)
 
-  for (;;) {
+  for (let i = 0; i < iterationsToRun; i++) {
     const iterationNumber = globalIterationCount++
     const currentProxyPort = PROXY_PORT_START + (iterationNumber % (PROXY_PORT_END - PROXY_PORT_START + 1))
     
@@ -676,8 +686,11 @@ async function runWorker(workerId: number): Promise<void> {
     }
     
     // Small delay between iterations within worker
-    await new Promise(resolve => setTimeout(resolve, 1000))
+    if (i < iterationsToRun - 1) {
+      await new Promise(resolve => setTimeout(resolve, 1000))
+    }
   }
+  logInfo(`[W${workerId}] Worker completed ${stats.iterations} iterations (${stats.errors} errors)`)
 }
 
 async function printStats(): Promise<void> {
@@ -717,11 +730,17 @@ async function main(): Promise<void> {
   logInfo(`Total Memory: ${sysInfo.totalMemory} GB`)
   logInfo(`Free Memory: ${sysInfo.freeMemory} GB`)
   logInfo(`Max Concurrent Workers: ${MAX_CONCURRENT_WORKERS}`)
+  logInfo(`Worker Batch Size: ${WORKER_BATCH_SIZE}`)
   logInfo(`Cached Files: ${CACHED_FILES.length} files configured for caching`)
-  
-  logInfo(`Proxy Mode: DataImpulse (${PROXY_HOST}:${PROXY_PORT})`)
+  logInfo(`Proxy Host: ${PROXY_HOST}, Ports: ${PROXY_PORT_START}-${PROXY_PORT_END}`)
   logInfo('============================\n')
   
+  // Route Node fetch via proxy for preloads and diagnostics
+  if (PROXY_HOST && PROXY_PORT) {
+    const auth = PROXY_USER && PROXY_PASS ? `${encodeURIComponent(PROXY_USER)}:${encodeURIComponent(PROXY_PASS)}@` : ''
+    setGlobalDispatcher(new ProxyAgent(`http://${auth}${PROXY_HOST}:${PROXY_PORT}`))
+  }
+
   // Preload cache before starting workers
   await preloadCache()
   
@@ -730,19 +749,42 @@ async function main(): Promise<void> {
 
   // Start stats printer
   const statsInterval = setInterval(printStats, 15000)
+  
+  let totalIterationsRun = 0
+  let batchNumber = 0
+  
+  while (totalIterationsRun < MAX_ITERATIONS) {
+    batchNumber++
+    const remainingIterations = MAX_ITERATIONS - totalIterationsRun
+    const iterationsThisBatch = Math.min(remainingIterations, WORKER_BATCH_SIZE * MAX_CONCURRENT_WORKERS)
+    const iterationsPerWorker = Math.ceil(iterationsThisBatch / MAX_CONCURRENT_WORKERS)
+    
+    logInfo(`\n=== BATCH ${batchNumber} ===`)
+    logInfo(`Running ${iterationsThisBatch} iterations across ${MAX_CONCURRENT_WORKERS} workers`)
+    logInfo(`${iterationsPerWorker} iterations per worker`)
+    logInfo('==================\n')
 
-  // Clear previous worker stats
-  workerStats.clear()
-
-  // Start workers independently (no batching)
-  for (let workerId = 0; workerId < MAX_CONCURRENT_WORKERS; workerId++) {
-    runWorker(workerId).catch(err => logError(`[W${workerId}] Worker crashed:`, err))
+    workerStats.clear()
+    const workerPromises: Promise<void>[] = []
+    for (let workerId = 0; workerId < MAX_CONCURRENT_WORKERS; workerId++) {
+      const actualIterations = Math.min(iterationsPerWorker, remainingIterations - (workerId * iterationsPerWorker))
+      if (actualIterations > 0) {
+        workerPromises.push(runWorker(workerId, actualIterations))
+      }
+    }
+    await Promise.all(workerPromises)
+    totalIterationsRun += iterationsThisBatch
+    
+    logInfo(`\n=== BATCH ${batchNumber} COMPLETED ===`)
+    logInfo(`Total iterations completed: ${totalIterationsRun}/${MAX_ITERATIONS}`)
+    await printStats()
+    
+    if (totalIterationsRun < MAX_ITERATIONS) {
+      await new Promise(resolve => setTimeout(resolve, 5000))
+    }
   }
-
-  // Keep process alive; stats printer will continue
-  while (true) {
-    await new Promise(resolve => setTimeout(resolve, 60000))
-  }
+  
+  clearInterval(statsInterval)
 }
 
 // Handle process termination gracefully
