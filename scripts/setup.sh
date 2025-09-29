@@ -20,13 +20,13 @@ sudo mkdir -p /var/log/journal
 sudo systemctl restart systemd-journald
 
 
+# setting up project
+yarn
+
+
 #settings up playwright
 npx --yes playwright install --with-deps
 npx --yes playwright install webkit
-
-
-# setting up project
-yarn
 
 
 # setting up squid
