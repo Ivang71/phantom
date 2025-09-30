@@ -4,8 +4,7 @@ import { config as loadEnv } from 'dotenv'
 import * as os from 'os'
 import { StatsManager } from './stats'
 const { ProxyAgent, setGlobalDispatcher } = require('undici')
-const { Proxy: MitmProxy } = require('http-mitm-proxy')
-const { HttpProxyAgent } = require('http-proxy-agent')
+import * as net from 'net'
 
 loadEnv()
 
@@ -68,33 +67,112 @@ let globalProxyBytesDown = 0
 let globalProxyBlocked = 0
 
 function startLocalFilterProxy(): void {
-  const proxy = new MitmProxy()
   const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const allow = new RegExp(`(?:\\.|^)pcdelv\\.com$|(?:\\.|^)popcash\\.net$|^${esc(TARGET_HOST)}$`, 'i')
-  const auth = PROXY_USER && PROXY_PASS ? `${encodeURIComponent(PROXY_USER)}:${encodeURIComponent(PROXY_PASS)}@` : ''
-  const upstreamUrl = `http://${auth}${PROXY_HOST}:${PROXY_PORT}`
-  const upstreamAgent = new HttpProxyAgent(upstreamUrl)
+  const upstreamHost = PROXY_HOST
+  const upstreamPort = PROXY_PORT
+  const authHeader = (PROXY_USER || PROXY_PASS) ? 'Proxy-Authorization: Basic ' + Buffer.from(`${PROXY_USER}:${PROXY_PASS}`).toString('base64') + '\r\n' : ''
 
-  proxy.onRequest((ctx: any, next: any) => {
-    try {
-      const hostHeader = (ctx.clientToProxyRequest.headers?.host || '') as string
-      const hostOnly = hostHeader.split(':')[0]
-      if (!allow.test(hostOnly)) {
-        globalProxyBlocked++
-        ctx.proxyToClientResponse.writeHead(403, { 'Content-Type': 'text/plain' })
-        ctx.proxyToClientResponse.end('filtered')
-        return
+  const server = net.createServer((clientSocket) => {
+    let bufferedFromClient: Buffer[] = []
+    let tunnelEstablished = false
+    let isConnect = false
+    let targetHost = ''
+    let targetPort = 443
+
+    const flush = () => { for (const b of bufferedFromClient) try { upstream.write(b) } catch {} bufferedFromClient = [] }
+    let upstream: net.Socket
+
+    clientSocket.once('data', (firstChunk: Buffer) => {
+      try {
+        const reqText = firstChunk.toString('utf8')
+        const firstLineEnd = reqText.indexOf('\r\n')
+        const firstLine = firstLineEnd >= 0 ? reqText.slice(0, firstLineEnd) : ''
+        isConnect = firstLine.startsWith('CONNECT ')
+        if (isConnect) {
+          const m = firstLine.match(/^CONNECT\s+([^:\s]+):(\d+)/i)
+          if (m) { targetHost = m[1]; targetPort = Number(m[2]) || 443 }
+        } else {
+          const m = firstLine.match(/^[A-Z]+\s+https?:\/\/([^\/:\s]+)(?::(\d+))?/i)
+          if (m) { targetHost = m[1]; if (m[2]) targetPort = Number(m[2]) }
+          if (!targetHost) {
+            const hostMatch = reqText.match(/\r\nHost:\s*([^\r\n]+)/i)
+            if (hostMatch) {
+              const hp = hostMatch[1].trim().split(':')
+              targetHost = hp[0]; if (hp[1]) targetPort = Number(hp[1])
+            }
+          }
+        }
+
+        if (!allow.test(targetHost)) {
+          globalProxyBlocked++
+          try { clientSocket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: 8\r\n\r\nfiltered') } catch {}
+          try { clientSocket.destroy() } catch {}
+          return
+        }
+
+        upstream = net.connect({ host: upstreamHost, port: upstreamPort }, () => {
+          if (isConnect) {
+            const connectReq = `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\n${authHeader}\r\n`
+            upstream.write(connectReq)
+          } else {
+            let proxyReq = reqText
+            if (!/\r\nProxy-Authorization:/i.test(proxyReq) && authHeader) {
+              proxyReq = proxyReq.replace(/\r\n\r\n/, `\r\n${authHeader}\r\n`)
+            }
+            upstream.write(Buffer.from(proxyReq, 'utf8'))
+          }
+        })
+
+        // Counters
+        clientSocket.on('data', (d) => { globalProxyBytesUp += d.length })
+        upstream.on('data', (d) => { globalProxyBytesDown += d.length })
+
+        upstream.on('data', (data) => {
+          if (isConnect && !tunnelEstablished) {
+            const resp = data.toString('utf8')
+            const headerEnd = resp.indexOf('\r\n\r\n')
+            if (headerEnd !== -1) {
+              if (/^HTTP\/1\.[01]\s+200/i.test(resp)) {
+                tunnelEstablished = true
+                try { clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n') } catch {}
+                const remain = data.slice(headerEnd + 4)
+                if (remain.length) clientSocket.write(remain)
+                flush()
+                return
+              } else {
+                try { clientSocket.write(data) } catch {}
+                try { clientSocket.destroy() } catch {}
+                try { upstream.destroy() } catch {}
+                return
+              }
+            }
+          } else {
+            clientSocket.write(data)
+          }
+        })
+
+        upstream.on('error', () => { try { clientSocket.destroy() } catch {} })
+        clientSocket.on('error', () => { try { upstream.destroy() } catch {} })
+        clientSocket.on('close', () => { try { upstream.destroy() } catch {} })
+        upstream.on('close', () => { try { clientSocket.destroy() } catch {} })
+
+        clientSocket.on('data', (data) => {
+          if (isConnect && !tunnelEstablished) {
+            bufferedFromClient.push(data)
+          } else {
+            upstream.write(data)
+          }
+        })
+      } catch {
+        try { clientSocket.destroy() } catch {}
       }
-      ctx.proxyToServerRequestOptions = ctx.proxyToServerRequestOptions || {}
-      ctx.proxyToServerRequestOptions.agent = upstreamAgent
-      ctx.onRequestData((_: any, chunk: Buffer, cb: any) => { globalProxyBytesUp += chunk.length; cb(null, chunk) })
-      ctx.onResponseData((_: any, chunk: Buffer, cb: any) => { globalProxyBytesDown += chunk.length; cb(null, chunk) })
-    } catch (_) {}
-    return next()
+    })
   })
 
-  proxy.listen({ port: LOCAL_FILTER_PORT })
-  logInfo(`[PROXY] MITM filter on :${LOCAL_FILTER_PORT} → ${PROXY_HOST}:${PROXY_PORT} (allow *.pcdelv.com *.popcash.com ${TARGET_HOST})`)
+  server.listen(LOCAL_FILTER_PORT, () => {
+    logInfo(`[PROXY] Tunnel filter on :${LOCAL_FILTER_PORT} → ${PROXY_HOST}:${PROXY_PORT} (allow *.pcdelv.com *.popcash.net ${TARGET_HOST})`)
+  })
 }
 
 async function preloadCache(): Promise<void> {
@@ -330,17 +408,10 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
 
   const page = await context.newPage()
   
-  // Simple route handler for caching only
+  // Simple route handler for caching only (no aborts)
   await page.route('**/*', async (route) => {
     try {
-      const request = route.request()
-      const resourceType = request.resourceType()
-      const blockedTypes = ['image', 'stylesheet', 'font', 'media', 'websocket', 'manifest', 'other']
-      if (blockedTypes.includes(resourceType)) {
-        await route.abort()
-        return
-      }
-      const url = request.url()
+      const url = route.request().url()
       
       // Check if this file should be served from cache
       if (CACHED_FILES.includes(url)) {
@@ -359,7 +430,6 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         }
       }
       
-      // Let all other requests through
       await route.continue()
     } catch (e) {
       logDebug(`[W${workerId}] [ROUTE ERROR] ${route.request().url()}: ${e instanceof Error ? e.message : String(e)}`)
