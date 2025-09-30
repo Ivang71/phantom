@@ -516,7 +516,6 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       configurable: true,
       enumerable: true
     })
-    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] })
     Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] })
     Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 })
     

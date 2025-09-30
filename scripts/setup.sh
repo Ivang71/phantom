@@ -27,8 +27,3 @@ yarn
 #settings up playwright
 npx --yes playwright install --with-deps
 npx --yes playwright install webkit
-
-
-# setting up squid
-# chmod +x ./scripts/squid-setup.sh
-# ./scripts/squid-setup.sh
