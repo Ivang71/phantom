@@ -153,7 +153,7 @@ async function createBrowserWithProxy(_proxyPort: number) {
   }
   
   return await chromium.launch({
-    headless: process.env.HEADLESS === 'true',
+    headless: process.env.HEADLESS !== 'false',
     args: [
       // === make Chrome shut up ===
       '--disable-background-networking',
@@ -206,11 +206,15 @@ async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSe
 }
 
 async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{ bytesSent: number, bytesReceived: number, success: boolean }> {
+  const startProxyUp = globalProxyBytesUp
+  const startProxyDown = globalProxyBytesDown
   const browser = await createBrowserWithProxy(proxyPort)
-  let totalBytesSent = 0
-  let totalBytesReceived = 0
   let isClosing = false
   let wasSuccessful = false
+  const getProxyDelta = (): { bytesSent: number, bytesReceived: number } => ({
+    bytesSent: Math.max(0, globalProxyBytesUp - startProxyUp),
+    bytesReceived: Math.max(0, globalProxyBytesDown - startProxyDown)
+  })
 
   async function detectGeoViaProxy(): Promise<{ countryCode: string, timezone: string, lat: number, lon: number }> {
     const tmp = await browser.newContext()
@@ -377,18 +381,9 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     }
   })
 
-  // Track network requests for data measurement (excluding cache hits)
+  // Track requests only for diagnostics and success detection; byte counting is in proxy
   page.on('request', (request) => {
     const url = request.url()
-    const method = request.method()
-    const postData = request.postData()
-    const urlSize = Buffer.byteLength(request.url(), 'utf8')
-    const postSize = postData ? Buffer.byteLength(postData, 'utf8') : 0
-    const headerSize = 200 // estimate
-    const totalSent = urlSize + postSize + headerSize
-    
-    // Check if this will be served from cache
-    const willBeCacheHit = CACHED_FILES.includes(url) && fileCache.has(url)
     
     // Debug: log when the initial redirect endpoint is hit
     if (url.includes('p.pcdelv.com/go/')) {
@@ -405,16 +400,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       }
     }
     
-    logDebug(`[W${workerId}] [REQUEST] ${method} ${url}`)
-    if (postData) {
-      logDebug(`[W${workerId}]   POST Data: ${formatBytes(postSize)}`)
-    }
-    logDebug(`[W${workerId}]   URL: ${formatBytes(urlSize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSent)}${willBeCacheHit ? ' (CACHED - NOT COUNTED)' : ''}`)
-    
-    // Only count actual network requests, not cache hits
-    if (!willBeCacheHit) {
-      totalBytesSent += totalSent
-    }
+    logDebug(`[W${workerId}] [REQUEST] ${request.method()} ${url}`)
   })
   
   page.on('response', async (response) => {
@@ -423,51 +409,18 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     try {
       const url = response.url()
       const status = response.status()
-      let bodySize: number
-      let contentType: string
       let isCacheHit = false
       
       // Check if this was served from pre-loaded cache
       if (CACHED_FILES.includes(url) && fileCache.has(url)) {
         isCacheHit = true
-        const cached = fileCache.get(url)!
-        bodySize = cached.content.length
-        contentType = cached.contentType
       } else {
-        // Get response body for network requests (skip redirects)
-        const status = response.status()
-        if (status >= 300 && status < 400) {
-          // Redirect response - body is unavailable
-          bodySize = 0
-          contentType = response.headers()['content-type'] || 'redirect'
-        } else {
-          try {
-            const bodyPromise = response.body()
-            const timeoutPromise = new Promise<Buffer>((_, reject) => 
-              setTimeout(() => reject(new Error('Response body timeout')), 10000)
-            )
-            const body = await Promise.race([bodyPromise, timeoutPromise])
-            bodySize = body.length
-            contentType = response.headers()['content-type'] || 'unknown'
-          } catch (bodyError) {
-            logDebug(`[W${workerId}] [BODY ERROR] Failed to get response body for ${url}: ${bodyError instanceof Error ? bodyError.message : String(bodyError)}`)
-            bodySize = 0
-            contentType = 'unknown'
-            return
-          }
-        }
+        // no size accounting here; proxy counts bytes
       }
       
-      const headerSize = 500 // estimate
-      const totalSize = bodySize + headerSize
-      
       logDebug(`[W${workerId}] [RESPONSE] ${status} ${url}`)
-      logDebug(`[W${workerId}]   Content-Type: ${contentType}`)
-      logDebug(`[W${workerId}]   Body: ${formatBytes(bodySize)}, Headers: ${formatBytes(headerSize)}, Total: ${formatBytes(totalSize)}${isCacheHit ? ' (CACHED - NOT COUNTED)' : ''}`)
-      
-      // Only count actual network responses, not cache hits
-      if (!isCacheHit) {
-        totalBytesReceived += totalSize
+      if (isCacheHit) {
+        logDebug(`[W${workerId}]   Served from preloaded cache: ${url}`)
       }
     } catch (e) {
       if (!isClosing) {
@@ -518,17 +471,18 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
 
   try {
     await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 7000 })
-  } catch (e) {
-    logWarn(`[W${workerId}] [TIMEOUT] Page load timeout or error: ${e instanceof Error ? e.message : String(e)}`)
+    } catch (e) {
+      logWarn(`[W${workerId}] [TIMEOUT] Page load timeout or error: ${e instanceof Error ? e.message : String(e)}`)
     try {
       await page.close()
       await context.close()
       await browser.close()
     } catch (e) {}
-    return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
+      const d = getProxyDelta()
+      return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
   }
   
-  if (page.isClosed()) return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
+  if (page.isClosed()) { const d = getProxyDelta(); return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful } }
 
   // Minimal trigger; show.js will mount the div itself
   try {
@@ -603,7 +557,8 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
           isClosing = true
           try { await page.waitForLoadState('networkidle', { timeout: DEBUG_MODE ? 60000 : 400 }) } catch (e) {}
           try { await browser.close() } catch (e) {}
-          return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
+          const d = getProxyDelta()
+          return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
         }
       } else {
         // Case 2: Pop-up - close original, wait on new window
@@ -613,7 +568,8 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         try { await page.close() } catch (e) {}
         try { await opened.waitForLoadState('domcontentloaded', { timeout: DEBUG_MODE ? 60000 : 300 }).catch(() => {}) } catch (e) {}
         try { await browser.close() } catch (e) {}
-        return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
+        const d = getProxyDelta()
+        return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
       }
     } else {
       // No new page; check if current navigated
@@ -622,7 +578,8 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         isClosing = true
         try { await page.waitForLoadState('networkidle', { timeout: DEBUG_MODE ? 60000 : 300 }) } catch (e) {}
         try { await browser.close() } catch (e) {}
-        return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
+        const d = getProxyDelta()
+        return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
       }
     }
   }
@@ -650,7 +607,8 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     console.log(`[W${workerId}] FAIL`)
   }
   
-  return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
+  const d = getProxyDelta()
+  return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
 }
 
 function formatBytes(bytes: number): string {
