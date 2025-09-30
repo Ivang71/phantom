@@ -4,8 +4,10 @@
   "main": "src/main.ts",
   "license": "MIT",
   "scripts": {
+    "debug": "export LOG_MODE=debug DEBUG_MODE=true && ts-node src/main.ts",
     "dev": "export LOG_MODE=debug && ts-node src/main.ts",
-    "prod": "export LOG_MODE=prod && tsc && node dist/main.js"
+    "prod": "export LOG_MODE=prod && tsc && node dist/main.js",
+    "proxy": "node scripts/mitm-proxy.js"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
@@ -16,6 +18,9 @@
   },
   "dependencies": {
     "dotenv": "^17.2.2",
+    "http-mitm-proxy": "^1.1.0",
+    "http-proxy-agent": "^7.0.2",
+    "https-proxy-agent": "^7.0.6",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "undici": "^6.19.8",

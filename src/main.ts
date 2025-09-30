@@ -4,11 +4,14 @@ import { config as loadEnv } from 'dotenv'
 import * as os from 'os'
 import { StatsManager } from './stats'
 const { ProxyAgent, setGlobalDispatcher } = require('undici')
+const { Proxy: MitmProxy } = require('http-mitm-proxy')
+const { HttpProxyAgent } = require('http-proxy-agent')
 
 loadEnv()
 
 const PROXY_PORT_START = 10000
 const PROXY_PORT_END = 20000
+const LOCAL_FILTER_PORT = Number(process.env.LOCAL_FILTER_PORT || 8000)
 const MAX_CONCURRENT_WORKERS = Number(process.env.NUMBER_OF_WORKERS)
 const PROXY_HOST = process.env.PROXY_HOST as string
 const PROXY_PORT = Number(process.env.PROXY_PORT)
@@ -51,6 +54,7 @@ function logDebug(message: string, ...args: any[]): void {
 
 const TARGET_URL = process.env.TARGET_URL as string
 const DEBUG_MODE = process.env.DEBUG_MODE === 'true'
+const TARGET_HOST = (() => { try { return new URL(TARGET_URL).hostname } catch { return '' } })()
 
 // Centralized cache for frequently requested files
 const fileCache = new Map<string, { content: Buffer, contentType: string }>()
@@ -58,6 +62,40 @@ const CACHED_FILES = [
   'https://cdn.popcash.net/show.js',
   TARGET_URL
 ]
+
+let globalProxyBytesUp = 0
+let globalProxyBytesDown = 0
+let globalProxyBlocked = 0
+
+function startLocalFilterProxy(): void {
+  const proxy = new MitmProxy()
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const allow = new RegExp(`(?:\\.|^)(pcdelv|popcash)\\.com$|(?:\\.|^)${esc(TARGET_HOST)}$`, 'i')
+  const auth = PROXY_USER && PROXY_PASS ? `${encodeURIComponent(PROXY_USER)}:${encodeURIComponent(PROXY_PASS)}@` : ''
+  const upstreamUrl = `http://${auth}${PROXY_HOST}:${PROXY_PORT}`
+  const upstreamAgent = new HttpProxyAgent(upstreamUrl)
+
+  proxy.onRequest((ctx: any, next: any) => {
+    try {
+      const hostHeader = (ctx.clientToProxyRequest.headers?.host || '') as string
+      const hostOnly = hostHeader.split(':')[0]
+      if (!allow.test(hostOnly)) {
+        globalProxyBlocked++
+        ctx.proxyToClientResponse.writeHead(403, { 'Content-Type': 'text/plain' })
+        ctx.proxyToClientResponse.end('filtered')
+        return
+      }
+      ctx.proxyToServerRequestOptions = ctx.proxyToServerRequestOptions || {}
+      ctx.proxyToServerRequestOptions.agent = upstreamAgent
+      ctx.onRequestData((_: any, chunk: Buffer, cb: any) => { globalProxyBytesUp += chunk.length; cb(null, chunk) })
+      ctx.onResponseData((_: any, chunk: Buffer, cb: any) => { globalProxyBytesDown += chunk.length; cb(null, chunk) })
+    } catch (_) {}
+    return next()
+  })
+
+  proxy.listen({ port: LOCAL_FILTER_PORT })
+  logInfo(`[PROXY] MITM filter on :${LOCAL_FILTER_PORT} → ${PROXY_HOST}:${PROXY_PORT} (allow *.pcdelv.com *.popcash.com ${TARGET_HOST})`)
+}
 
 async function preloadCache(): Promise<void> {
   logInfo('=== PRELOADING CACHE ===')
@@ -109,15 +147,13 @@ function getSystemInfo() {
   }
 }
 
-async function createBrowserWithProxy(proxyPort: number) {
+async function createBrowserWithProxy(_proxyPort: number) {
   const proxyConfig = {
-    server: `http://${PROXY_HOST}:${proxyPort}`,
-    username: PROXY_USER,
-    password: PROXY_PASS
+    server: `http://127.0.0.1:${LOCAL_FILTER_PORT}`
   }
   
   return await chromium.launch({
-    headless: true,
+    headless: false,
     args: [
       // === make Chrome shut up ===
       '--disable-background-networking',
@@ -136,6 +172,7 @@ async function createBrowserWithProxy(proxyPort: number) {
       '--disable-quic',
       '--dns-prefetch-disable',
       '--disable-features=PreconnectToOrigins,PrefetchPrivacyChanges',
+      '--disable-features=DnsOverHttps,AsyncDns',
       
       // === keep the ones you already had ===
       '--no-sandbox',
@@ -148,9 +185,10 @@ async function createBrowserWithProxy(proxyPort: number) {
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
       '--disable-renderer-backgrounding',
-      '--disable-features=VizDisplayCompositor'
+      '--disable-features=VizDisplayCompositor',
+      '--ignore-certificate-errors'
     ],
-    ...(proxyConfig && { proxy: proxyConfig })
+    proxy: proxyConfig
   })
 }
 
@@ -280,7 +318,8 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     timezoneId: detectedTz,
     geolocation: detectedGeo,
     permissions: ['geolocation'],
-    extraHTTPHeaders: { 'Accept-Language': `${detectedLocale.split('-')[0]}-${detectedLocale.split('-')[1]},${detectedLocale.split('-')[0]};q=0.9,en;q=0.8` }
+    extraHTTPHeaders: { 'Accept-Language': `${detectedLocale.split('-')[0]}-${detectedLocale.split('-')[1]},${detectedLocale.split('-')[0]};q=0.9,en;q=0.8` },
+    ignoreHTTPSErrors: true
   })
   
   logDebug(`[W${workerId}] [BROWSER] User agent: ${userAgent.toString()}`)
@@ -703,6 +742,7 @@ async function printStats(): Promise<void> {
   logInfo(`Global Iterations: ${Array.from(workerStats.values()).reduce((sum, s) => sum + s.iterations, 0)}`)
   logInfo(`Global Errors: ${Array.from(workerStats.values()).reduce((sum, s) => sum + s.errors, 0)}`)
   logInfo(`Global Network: Sent ${formatBytes(globalBytesSent)}, Received ${formatBytes(globalBytesReceived)}`)
+  logInfo(`[PROXY] Filter Totals: Up ${formatBytes(globalProxyBytesUp)}, Down ${formatBytes(globalProxyBytesDown)}, Blocked ${globalProxyBlocked}`)
   logInfo(`Cache Performance: ${globalCacheHits} hits, ${formatBytes(globalCacheBytesSaved)} saved`)
   logInfo(`Memory: RSS ${memUsage.rss}MB, Heap ${memUsage.heapUsed}MB`)
   logInfo(`System Memory: ${sysInfo.freeMemory}GB free of ${sysInfo.totalMemory}GB`)
@@ -736,7 +776,8 @@ async function main(): Promise<void> {
   logInfo(`Proxy Host: ${PROXY_HOST}, Ports: ${PROXY_PORT_START}-${PROXY_PORT_END}`)
   logInfo('============================\n')
   
-  // Route Node fetch via proxy for preloads and diagnostics
+  // Start local filter proxy; route Node fetch directly via DataImpulse to avoid TLS MITM
+  startLocalFilterProxy()
   if (PROXY_HOST && PROXY_PORT) {
     const auth = PROXY_USER && PROXY_PASS ? `${encodeURIComponent(PROXY_USER)}:${encodeURIComponent(PROXY_PASS)}@` : ''
     setGlobalDispatcher(new ProxyAgent(`http://${auth}${PROXY_HOST}:${PROXY_PORT}`))

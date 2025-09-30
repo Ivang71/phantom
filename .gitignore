@@ -1,5 +1,6 @@
 node_modules
 dist
+.http-mitm-proxy
 
 .env
 bot-stats.json
