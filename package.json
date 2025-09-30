@@ -6,8 +6,7 @@
   "scripts": {
     "debug": "export LOG_MODE=debug DEBUG_MODE=true && ts-node src/main.ts",
     "dev": "export LOG_MODE=debug && ts-node src/main.ts",
-    "prod": "export LOG_MODE=prod && tsc && node dist/main.js",
-    "proxy": "node scripts/mitm-proxy.js"
+    "prod": "export LOG_MODE=prod && tsc && node dist/main.js"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",

@@ -57,10 +57,7 @@ const TARGET_HOST = (() => { try { return new URL(TARGET_URL).hostname } catch {
 
 // Centralized cache for frequently requested files
 const fileCache = new Map<string, { content: Buffer, contentType: string }>()
-const CACHED_FILES = [
-  'https://cdn.popcash.net/show.js',
-  TARGET_URL
-]
+const CACHED_FILES: string[] = []
 
 let globalProxyBytesUp = 0
 let globalProxyBytesDown = 0
@@ -240,7 +237,6 @@ async function createBrowserWithProxy(_proxyPort: number) {
       '--disable-sync',
       '--metrics-recording-only',
       '--no-first-run',
-      '--no-pings',
       '--safebrowsing-disable-auto-update',
       '--disable-client-side-phishing-detection',
       '--disable-default-apps',
@@ -289,6 +285,8 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   const browser = await createBrowserWithProxy(proxyPort)
   let isClosing = false
   let wasSuccessful = false
+  const diagEvents: string[] = []
+  const addDiag = (m: string) => { if (DEBUG_MODE) diagEvents.push(`[W${workerId}] ${new Date().toISOString()} ${m}`) }
   const getProxyDelta = (): { bytesSent: number, bytesReceived: number } => ({
     bytesSent: Math.max(0, globalProxyBytesUp - startProxyUp),
     bytesReceived: Math.max(0, globalProxyBytesDown - startProxyDown)
@@ -414,6 +412,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   await page.route('**/*', async (route) => {
     try {
       const url = route.request().url()
+      addDiag(`[ROUTE] ${url}`)
       
       // Check if this file should be served from cache
       if (CACHED_FILES.includes(url)) {
@@ -423,6 +422,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
           globalCacheHits++
           globalCacheBytesSaved += cached.content.length
           logDebug(`[W${workerId}] [CACHE HIT] Serving ${url} from cache (${formatBytes(cached.content.length)})`)
+          addDiag(`[CACHE HIT] ${url}`)
           await route.fulfill({
             status: 200,
             contentType: cached.contentType,
@@ -435,6 +435,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       await route.continue()
     } catch (e) {
       logDebug(`[W${workerId}] [ROUTE ERROR] ${route.request().url()}: ${e instanceof Error ? e.message : String(e)}`)
+      addDiag(`[ROUTE ERROR] ${route.request().url()} ${e instanceof Error ? e.message : String(e)}`)
       try {
         await route.continue()
       } catch (continueError) {}
@@ -445,21 +446,25 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   page.on('requestfailed', (request) => {
     const failure = request.failure()
     logWarn(`[W${workerId}] [REQ FAILED] ${request.url()} - ${failure ? failure.errorText : 'unknown'}`)
+    addDiag(`[REQ FAILED] ${request.method()} ${request.url()} ${failure ? failure.errorText : 'unknown'}`)
   })
   page.on('response', (response) => {
     const status = response.status()
     if (status >= 400) {
       logWarn(`[W${workerId}] [HTTP ${status}] ${response.url()}`)
     }
+    addDiag(`[RESP] ${status} ${response.url()}`)
   })
 
   // Track requests only for diagnostics and success detection; byte counting is in proxy
   page.on('request', (request) => {
     const url = request.url()
+    addDiag(`[REQ] ${request.method()} ${url}`)
     
     // Debug: log when the initial redirect endpoint is hit
     if (url.includes('p.pcdelv.com/go/')) {
       logInfo(`[W${workerId}] [REDIRECT SEEN] HTTP go endpoint requested: ${url}`)
+      addDiag(`[REDIRECT SEEN] ${url}`)
     }
 
     // Detect final PopCash conversion endpoint
@@ -470,6 +475,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       } else {
         logInfo(`[W${workerId}] [SUCCESS] Final PopCash endpoint reached: ${url}`)
       }
+      addDiag(`[SUCCESS] ${url}`)
     }
     
     logDebug(`[W${workerId}] [REQUEST] ${request.method()} ${url}`)
@@ -541,9 +547,11 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   page.setDefaultNavigationTimeout(15000)
 
   try {
+    addDiag(`[GOTO] ${TARGET_URL}`)
     await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 7000 })
     } catch (e) {
       logWarn(`[W${workerId}] [TIMEOUT] Page load timeout or error: ${e instanceof Error ? e.message : String(e)}`)
+      addDiag(`[GOTO ERROR] ${e instanceof Error ? e.message : String(e)}`)
     try {
       await page.close()
       await context.close()
@@ -575,18 +583,35 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     2) Pop-up: a new window opens and starts the redirect chain; it becomes focused.
        Action: close the original TARGET_URL page and wait for the redirect chain to finish in the new window.
   */
-  // Wait for guaranteed mount (~1.5s); then query for high z-index/fixed div
-  await page.waitForTimeout(1500)
-  let targetDiv = await page.$('div[style*="z-index:9999999"], div[style*="position:fixed"][style*="z-index"]')
-  if (!targetDiv) {
-    const candidates = await page.$$('div')
-    for (const div of candidates) {
-      const style = await div.getAttribute('style')
-      if (style && style.includes('z-index') && (style.includes('9999999') || style.includes('position:fixed'))) {
-        targetDiv = div
-        break
+  // Wait for ad div to mount with polling (max 7s)
+  let targetDiv = null
+  const maxWaitTime = 10000
+  const pollInterval = 500
+  const startTime = Date.now()
+  
+  while (!targetDiv && (Date.now() - startTime) < maxWaitTime) {
+    targetDiv = await page.$('div[style*="z-index:9999999"], div[style*="position:fixed"][style*="z-index"]')
+    
+    if (!targetDiv) {
+      const candidates = await page.$$('div')
+      for (const div of candidates) {
+        const style = await div.getAttribute('style')
+        if (style && style.includes('z-index') && (style.includes('9999999') || style.includes('position:fixed'))) {
+          targetDiv = div
+          break
+        }
       }
     }
+    
+    if (!targetDiv && (Date.now() - startTime) < maxWaitTime) {
+      await page.waitForTimeout(pollInterval)
+    }
+  }
+  
+  if (targetDiv) {
+    addDiag(`[AD DIV FOUND] after ${Date.now() - startTime}ms`)
+  } else {
+    addDiag(`[AD DIV NOT FOUND] timeout after ${maxWaitTime}ms`)
   }
   
   if (targetDiv) {
@@ -604,7 +629,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     await page.waitForTimeout(300)
     const pagesBefore = context.pages()
     // Single decisive click
-    try { await targetDiv.click({ force: true }) } catch (e) {}
+    try { await targetDiv.click({ force: true }); addDiag('[CLICK] targetDiv clicked') } catch (e) { addDiag(`[CLICK ERROR] ${e instanceof Error ? e.message : String(e)}`) }
     await page.waitForTimeout(500)
     
     // Detect outcome
@@ -617,13 +642,14 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       // New tab/window opened
       const openedUrl = opened.url()
       const openedIsSameTarget = openedUrl === TARGET_URL || openedUrl === 'about:blank'
+      addDiag(`[POPUP] opened ${openedUrl || 'about:blank'} sameTarget=${openedIsSameTarget}`)
       if (openedIsSameTarget) {
         // Case 1: Pop-under - close new tab, wait on original
         try { await opened.bringToFront() } catch (e) {}
         try { await opened.close() } catch (e) {}
         try { await page.bringToFront() } catch (e) {}
         // Wait for redirect chain on original quickly via request observation
-        try { wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? 60000 : 15000) } catch (e) {}
+        try { addDiag('[WAIT] final on original'); wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? 60000 : 15000); addDiag(`[WAIT DONE] success=${wasSuccessful}`) } catch (e) { addDiag(`[WAIT ERROR] ${e instanceof Error ? e.message : String(e)}`) }
         if (wasSuccessful) {
           isClosing = true
           // Extra delay to let the success request fully complete
@@ -636,7 +662,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       } else {
         // Case 2: Pop-up - close original, wait on new window
         try { await opened.bringToFront() } catch (e) {}
-        try { wasSuccessful = await waitForFinalOnPage(opened, DEBUG_MODE ? 60000 : 15000) } catch (e) {}
+        try { addDiag('[WAIT] final on popup'); wasSuccessful = await waitForFinalOnPage(opened, DEBUG_MODE ? 60000 : 15000); addDiag(`[WAIT DONE] success=${wasSuccessful}`) } catch (e) { addDiag(`[WAIT ERROR] ${e instanceof Error ? e.message : String(e)}`) }
         // Extra delay to let the success request fully complete
         if (wasSuccessful) {
           await new Promise(resolve => setTimeout(resolve, 500))
@@ -649,7 +675,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       }
     } else {
       // No new page; check if current navigated
-      try { wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? 60000 : 15000) } catch (e) {}
+      try { addDiag('[WAIT] final on same page'); wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? 60000 : 15000); addDiag(`[WAIT DONE] success=${wasSuccessful}`) } catch (e) { addDiag(`[WAIT ERROR] ${e instanceof Error ? e.message : String(e)}`) }
       if (wasSuccessful) {
         isClosing = true
         // Extra delay to let the success request fully complete
@@ -660,6 +686,9 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
       }
     }
+  }
+  else {
+    addDiag('[AD DIV NOT FOUND]')
   }
   
   try {
@@ -681,8 +710,15 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     await browser.close()
   } catch (e) {}
   
-  if (!wasSuccessful && LOG_MODE === 'prod') {
-    console.log(`[W${workerId}] FAIL`)
+  if (!wasSuccessful) {
+    if (DEBUG_MODE) {
+      const d = getProxyDelta()
+      console.log(`[W${workerId}] DEBUG FAIL bytesUp=${formatBytes(d.bytesSent)} bytesDown=${formatBytes(d.bytesReceived)} events=${diagEvents.length}`)
+      for (const e of diagEvents) console.log(e)
+    }
+    if (LOG_MODE === 'prod') {
+      console.log(`[W${workerId}] FAIL`)
+    }
   }
   
   const d = getProxyDelta()
