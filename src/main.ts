@@ -70,7 +70,7 @@ let globalProxyBlocked = 0
 function startLocalFilterProxy(): void {
   const proxy = new MitmProxy()
   const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const allow = new RegExp(`(?:\\.|^)(pcdelv|popcash)\\.com$|(?:\\.|^)${esc(TARGET_HOST)}$`, 'i')
+  const allow = new RegExp(`(?:\\.|^)pcdelv\\.com$|(?:\\.|^)popcash\\.net$|^${esc(TARGET_HOST)}$`, 'i')
   const auth = PROXY_USER && PROXY_PASS ? `${encodeURIComponent(PROXY_USER)}:${encodeURIComponent(PROXY_PASS)}@` : ''
   const upstreamUrl = `http://${auth}${PROXY_HOST}:${PROXY_PORT}`
   const upstreamAgent = new HttpProxyAgent(upstreamUrl)
