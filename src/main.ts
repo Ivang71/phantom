@@ -50,6 +50,7 @@ function logDebug(message: string, ...args: any[]): void {
 }
 
 const TARGET_URL = process.env.TARGET_URL as string
+const DEBUG_MODE = process.env.DEBUG_MODE === 'true'
 
 // Centralized cache for frequently requested files
 const fileCache = new Map<string, { content: Buffer, contentType: string }>()
@@ -558,29 +559,29 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         try { await opened.close() } catch (e) {}
         try { await page.bringToFront() } catch (e) {}
         // Wait for redirect chain on original quickly via request observation
-        try { wasSuccessful = await waitForFinalOnPage(page, 7000) } catch (e) {}
+        try { wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? 60000 : 7000) } catch (e) {}
         if (wasSuccessful) {
           isClosing = true
-          try { await page.waitForLoadState('networkidle', { timeout: 400 }) } catch (e) {}
+          try { await page.waitForLoadState('networkidle', { timeout: DEBUG_MODE ? 60000 : 400 }) } catch (e) {}
           try { await browser.close() } catch (e) {}
           return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
         }
       } else {
         // Case 2: Pop-up - close original, wait on new window
         try { await opened.bringToFront() } catch (e) {}
-        try { wasSuccessful = await waitForFinalOnPage(opened, 7000) } catch (e) {}
+        try { wasSuccessful = await waitForFinalOnPage(opened, DEBUG_MODE ? 60000 : 7000) } catch (e) {}
         // Close immediately on success to end session
         try { await page.close() } catch (e) {}
-        try { await opened.waitForLoadState('domcontentloaded', { timeout: 300 }).catch(() => {}) } catch (e) {}
+        try { await opened.waitForLoadState('domcontentloaded', { timeout: DEBUG_MODE ? 60000 : 300 }).catch(() => {}) } catch (e) {}
         try { await browser.close() } catch (e) {}
         return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
       }
     } else {
       // No new page; check if current navigated
-      try { wasSuccessful = await waitForFinalOnPage(page, 7000) } catch (e) {}
+      try { wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? 60000 : 7000) } catch (e) {}
       if (wasSuccessful) {
         isClosing = true
-        try { await page.waitForLoadState('networkidle', { timeout: 300 }) } catch (e) {}
+        try { await page.waitForLoadState('networkidle', { timeout: DEBUG_MODE ? 60000 : 300 }) } catch (e) {}
         try { await browser.close() } catch (e) {}
         return { bytesSent: totalBytesSent, bytesReceived: totalBytesReceived, success: wasSuccessful }
       }
