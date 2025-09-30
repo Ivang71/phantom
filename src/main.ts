@@ -53,11 +53,16 @@ function logDebug(message: string, ...args: any[]): void {
 
 const TARGET_URL = process.env.TARGET_URL as string
 const DEBUG_MODE = process.env.DEBUG_MODE === 'true'
+const DEBUG_MAX_WAIT_MS = Number(process.env.DEBUG_MAX_WAIT_MS || 20000)
+const NORMAL_MAX_WAIT_MS = Number(process.env.NORMAL_MAX_WAIT_MS || 15000)
 const TARGET_HOST = (() => { try { return new URL(TARGET_URL).hostname } catch { return '' } })()
 
 // Centralized cache for frequently requested files
 const fileCache = new Map<string, { content: Buffer, contentType: string }>()
-const CACHED_FILES: string[] = []
+const CACHED_FILES = [
+  'https://cdn.popcash.net/show.js',
+  TARGET_URL
+]
 
 let globalProxyBytesUp = 0
 let globalProxyBytesDown = 0
@@ -509,6 +514,30 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   
   context.on('page', async (newPage) => {
     logDebug(`[W${workerId}] [NEW PAGE] Opened: ${newPage.url()}`)
+    addDiag(`[NEW PAGE] ${newPage.url()}`)
+    
+    // Wait for network idle on new page - if successful, mark cycle as done
+    try {
+      await newPage.waitForLoadState('networkidle', { timeout: 5000 })
+      addDiag(`[NEW PAGE NETWORK IDLE] ${newPage.url()}`)
+      
+      // Network idle indicates successful completion
+      wasSuccessful = true
+      isClosing = true
+      
+      // Close everything and return
+      try { await newPage.close() } catch {}
+      try { await page.close() } catch {}
+      try { await context.close() } catch {}
+      try { await browser.close() } catch {}
+      
+      const d = getProxyDelta()
+      return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
+    } catch (e) {
+      addDiag(`[NEW PAGE TIMEOUT] ${newPage.url()}`)
+      // Ensure we don't hang here; close quickly
+      try { await newPage.close({ runBeforeUnload: false }) } catch {}
+    }
   })
   
   await page.addInitScript(() => {
@@ -649,12 +678,12 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         try { await opened.close() } catch (e) {}
         try { await page.bringToFront() } catch (e) {}
         // Wait for redirect chain on original quickly via request observation
-        try { addDiag('[WAIT] final on original'); wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? 60000 : 15000); addDiag(`[WAIT DONE] success=${wasSuccessful}`) } catch (e) { addDiag(`[WAIT ERROR] ${e instanceof Error ? e.message : String(e)}`) }
+        try { addDiag('[WAIT] final on original'); wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? DEBUG_MAX_WAIT_MS : NORMAL_MAX_WAIT_MS); addDiag(`[WAIT DONE] success=${wasSuccessful}`) } catch (e) { addDiag(`[WAIT ERROR] ${e instanceof Error ? e.message : String(e)}`) }
         if (wasSuccessful) {
           isClosing = true
           // Extra delay to let the success request fully complete
           await new Promise(resolve => setTimeout(resolve, 500))
-          try { await page.waitForLoadState('networkidle', { timeout: DEBUG_MODE ? 60000 : 400 }) } catch (e) {}
+          try { await page.waitForLoadState('networkidle', { timeout: 400 }) } catch (e) {}
           try { await browser.close() } catch (e) {}
           const d = getProxyDelta()
           return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
@@ -662,25 +691,25 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       } else {
         // Case 2: Pop-up - close original, wait on new window
         try { await opened.bringToFront() } catch (e) {}
-        try { addDiag('[WAIT] final on popup'); wasSuccessful = await waitForFinalOnPage(opened, DEBUG_MODE ? 60000 : 15000); addDiag(`[WAIT DONE] success=${wasSuccessful}`) } catch (e) { addDiag(`[WAIT ERROR] ${e instanceof Error ? e.message : String(e)}`) }
+        try { addDiag('[WAIT] final on popup'); wasSuccessful = await waitForFinalOnPage(opened, DEBUG_MODE ? DEBUG_MAX_WAIT_MS : NORMAL_MAX_WAIT_MS); addDiag(`[WAIT DONE] success=${wasSuccessful}`) } catch (e) { addDiag(`[WAIT ERROR] ${e instanceof Error ? e.message : String(e)}`) }
         // Extra delay to let the success request fully complete
         if (wasSuccessful) {
           await new Promise(resolve => setTimeout(resolve, 500))
         }
         try { await page.close() } catch (e) {}
-        try { await opened.waitForLoadState('domcontentloaded', { timeout: DEBUG_MODE ? 60000 : 300 }).catch(() => {}) } catch (e) {}
+        try { await opened.waitForLoadState('domcontentloaded', { timeout: 300 }).catch(() => {}) } catch (e) {}
         try { await browser.close() } catch (e) {}
         const d = getProxyDelta()
         return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
       }
     } else {
       // No new page; check if current navigated
-      try { addDiag('[WAIT] final on same page'); wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? 60000 : 15000); addDiag(`[WAIT DONE] success=${wasSuccessful}`) } catch (e) { addDiag(`[WAIT ERROR] ${e instanceof Error ? e.message : String(e)}`) }
+      try { addDiag('[WAIT] final on same page'); wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? DEBUG_MAX_WAIT_MS : NORMAL_MAX_WAIT_MS); addDiag(`[WAIT DONE] success=${wasSuccessful}`) } catch (e) { addDiag(`[WAIT ERROR] ${e instanceof Error ? e.message : String(e)}`) }
       if (wasSuccessful) {
         isClosing = true
         // Extra delay to let the success request fully complete
         await new Promise(resolve => setTimeout(resolve, 500))
-        try { await page.waitForLoadState('networkidle', { timeout: DEBUG_MODE ? 60000 : 300 }) } catch (e) {}
+        try { await page.waitForLoadState('networkidle', { timeout: 300 }) } catch (e) {}
         try { await browser.close() } catch (e) {}
         const d = getProxyDelta()
         return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
