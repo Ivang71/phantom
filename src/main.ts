@@ -350,13 +350,15 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     }
   }
 
-  async function waitForFinalOnPage(p: any, timeoutMs = 10000): Promise<boolean> {
+  async function waitForFinalOnPage(p: any, timeoutMs = 17000): Promise<boolean> {
     return new Promise((resolve) => {
       let done = false
       const onReq = (req: any) => {
         const u = req.url()
         if (u.includes('p.pcdelv.com/v2/') && u.endsWith('/cl')) {
-          cleanup(true)
+          // Small delay to ensure request completes before cleanup
+          setTimeout(() => cleanup(true), 300)
+          return
         }
       }
       const timer = setTimeout(() => cleanup(false), timeoutMs)
@@ -622,9 +624,11 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         try { await opened.close() } catch (e) {}
         try { await page.bringToFront() } catch (e) {}
         // Wait for redirect chain on original quickly via request observation
-        try { wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? 60000 : 7000) } catch (e) {}
+        try { wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? 60000 : 15000) } catch (e) {}
         if (wasSuccessful) {
           isClosing = true
+          // Extra delay to let the success request fully complete
+          await new Promise(resolve => setTimeout(resolve, 500))
           try { await page.waitForLoadState('networkidle', { timeout: DEBUG_MODE ? 60000 : 400 }) } catch (e) {}
           try { await browser.close() } catch (e) {}
           const d = getProxyDelta()
@@ -633,8 +637,11 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       } else {
         // Case 2: Pop-up - close original, wait on new window
         try { await opened.bringToFront() } catch (e) {}
-        try { wasSuccessful = await waitForFinalOnPage(opened, DEBUG_MODE ? 60000 : 7000) } catch (e) {}
-        // Close immediately on success to end session
+        try { wasSuccessful = await waitForFinalOnPage(opened, DEBUG_MODE ? 60000 : 15000) } catch (e) {}
+        // Extra delay to let the success request fully complete
+        if (wasSuccessful) {
+          await new Promise(resolve => setTimeout(resolve, 500))
+        }
         try { await page.close() } catch (e) {}
         try { await opened.waitForLoadState('domcontentloaded', { timeout: DEBUG_MODE ? 60000 : 300 }).catch(() => {}) } catch (e) {}
         try { await browser.close() } catch (e) {}
@@ -643,9 +650,11 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       }
     } else {
       // No new page; check if current navigated
-      try { wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? 60000 : 7000) } catch (e) {}
+      try { wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? 60000 : 15000) } catch (e) {}
       if (wasSuccessful) {
         isClosing = true
+        // Extra delay to let the success request fully complete
+        await new Promise(resolve => setTimeout(resolve, 500))
         try { await page.waitForLoadState('networkidle', { timeout: DEBUG_MODE ? 60000 : 300 }) } catch (e) {}
         try { await browser.close() } catch (e) {}
         const d = getProxyDelta()
