@@ -153,7 +153,7 @@ async function createBrowserWithProxy(_proxyPort: number) {
   }
   
   return await chromium.launch({
-    headless: false,
+    headless: process.env.HEADLESS === 'true',
     args: [
       // === make Chrome shut up ===
       '--disable-background-networking',
