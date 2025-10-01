@@ -23,8 +23,15 @@ const WORKER_BATCH_SIZE = 500000000
 // ensuring parity with the browsing context's proxy path
 const localFilterAgent = new ProxyAgent(`http://127.0.0.1:${LOCAL_FILTER_PORT}`)
 
-// Toggle domain filtering for the local filter proxy (default: off)
+// Toggle domain filtering for the local filter proxy (default: on)
 const DOMAIN_FILTERING = process.env.DOMAIN_FILTERING !== 'false'
+
+// Toggle bypass of the local MITM filter proxy (default: off)
+const BYPASS_MITM = process.env.BYPASS_MITM === 'true'
+
+// Upstream proxy agent (DataImpulse) built from env
+const upstreamProxyAuth = (PROXY_USER && PROXY_PASS) ? `${encodeURIComponent(PROXY_USER)}:${encodeURIComponent(PROXY_PASS)}@` : ''
+const upstreamAgent = new ProxyAgent(`http://${upstreamProxyAuth}${PROXY_HOST}:${PROXY_PORT}`)
 
 enum LogLevel {
   ERROR = 0,
@@ -257,9 +264,15 @@ function getSystemInfo() {
   }
 }
 
-async function createBrowserWithProxy(_proxyPort: number) {
-  const proxyConfig = {
-    server: `http://127.0.0.1:${LOCAL_FILTER_PORT}`
+async function createBrowserWithProxy(proxyPort: number) {
+  let proxyConfig: any
+  if (BYPASS_MITM) {
+    proxyConfig = {
+      server: `http://${PROXY_HOST}:${proxyPort}`,
+      ...(PROXY_USER && PROXY_PASS && { username: PROXY_USER, password: PROXY_PASS })
+    }
+  } else {
+    proxyConfig = { server: `http://127.0.0.1:${LOCAL_FILTER_PORT}` }
   }
   
   return await chromium.launch({
@@ -329,7 +342,10 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
 
   async function detectGeoViaProxy(): Promise<{ countryCode: string, timezone: string, lat: number, lon: number }> {
     const url = 'http://ip-api.com/json?fields=status,countryCode,timezone,lat,lon'
-    const response = await undiciFetch(url, { dispatcher: localFilterAgent })
+    const dispatcher = BYPASS_MITM
+      ? new ProxyAgent(`http://${upstreamProxyAuth}${PROXY_HOST}:${proxyPort}`)
+      : localFilterAgent
+    const response = await undiciFetch(url, { dispatcher })
     if (!response.ok) {
       throw new Error(`Geo lookup HTTP ${response.status}`)
     }
@@ -382,23 +398,51 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   async function waitForFinalOnPage(p: any, timeoutMs = WAIT_FOR_FINAL_ON_PAGE_DEFAULT_MS): Promise<boolean> {
     return new Promise((resolve) => {
       let done = false
-      const onReq = (req: any) => {
-        const u = req.url()
-        if (u.includes('p.pcdelv.com/v2/') && u.endsWith('/cl')) {
-          // Small delay to ensure request completes before cleanup
-          setTimeout(() => cleanup(true), 300)
-          return
-        }
+      const isInternalHost = (host: string | undefined): boolean => {
+        if (!host) return true
+        const h = host.toLowerCase()
+        return h.endsWith('pcdelv.com') || h.endsWith('popcash.net')
+      }
+      const onResp = (resp: any) => {
+        try {
+          const u = resp.url()
+          if (u.includes('p.pcdelv.com/v2/') && u.endsWith('/cl')) {
+            const status = resp.status()
+            if (status >= 300 && status < 400) {
+              const headers = resp.headers?.() || {}
+              const loc = headers['location'] || headers['Location']
+              if (loc && typeof loc === 'string') {
+                let host: string | undefined
+                try {
+                  if (loc.startsWith('http://') || loc.startsWith('https://')) {
+                    host = new URL(loc).hostname
+                  } else if (loc.startsWith('//')) {
+                    host = new URL('http:' + loc).hostname
+                  } else {
+                    // relative URL: same host, not external
+                    host = undefined
+                  }
+                } catch (e) {
+                  host = undefined
+                }
+                if (!isInternalHost(host)) {
+                  // external redirect reached → success
+                  setTimeout(() => cleanup(true), 300)
+                }
+              }
+            }
+          }
+        } catch (e) {}
       }
       const timer = setTimeout(() => cleanup(false), timeoutMs)
       function cleanup(result: boolean) {
         if (done) return
         done = true
-        try { p.off('request', onReq) } catch (e) {}
+        try { p.off('response', onResp) } catch (e) {}
         clearTimeout(timer)
         resolve(result)
       }
-      try { p.on('request', onReq) } catch (e) { cleanup(false) }
+      try { p.on('response', onResp) } catch (e) { cleanup(false) }
     })
   }
 
@@ -498,16 +542,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       addDiag(`[REDIRECT SEEN] ${url}`)
     }
 
-    // Detect final PopCash conversion endpoint
-    if (url.includes('p.pcdelv.com/v2/') && url.endsWith('/cl')) {
-      wasSuccessful = true
-      if (LOG_MODE === 'prod') {
-        console.log(`[W${workerId}] SUCCESS ${url}`)
-      } else {
-        logInfo(`[W${workerId}] [SUCCESS] Final PopCash endpoint reached: ${url}`)
-      }
-      addDiag(`[SUCCESS] ${url}`)
-    }
+    // Detect final success in response handler instead of immediate request match
     
     logDebug(`[W${workerId}] [REQUEST] ${request.method()} ${url}`)
   })
@@ -528,6 +563,33 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       }
       
       logDebug(`[W${workerId}] [RESPONSE] ${status} ${url}`)
+      // Mark success when we observe the last /cl step redirecting outside internal hosts
+      if (url.includes('p.pcdelv.com/v2/') && url.endsWith('/cl') && status >= 300 && status < 400) {
+        try {
+          const headers = response.headers() as any
+          const loc = headers['location'] || headers['Location']
+          if (loc && typeof loc === 'string') {
+            let host: string | undefined
+            try {
+              if (loc.startsWith('http://') || loc.startsWith('https://')) {
+                host = new URL(loc).hostname
+              } else if (loc.startsWith('//')) {
+                host = new URL('http:' + loc).hostname
+              }
+            } catch (e) {}
+            const isInternal = host ? (host.toLowerCase().endsWith('pcdelv.com') || host.toLowerCase().endsWith('popcash.net')) : true
+            if (!isInternal) {
+              wasSuccessful = true
+              if (LOG_MODE === 'prod') {
+                console.log(`[W${workerId}] SUCCESS ${url} → ${loc}`)
+              } else {
+                logInfo(`[W${workerId}] [SUCCESS] External redirect after /cl: ${url} → ${loc}`)
+              }
+              addDiag(`[SUCCESS] ${url} → ${loc}`)
+            }
+          }
+        } catch (e) {}
+      }
       if (isCacheHit) {
         logDebug(`[W${workerId}]   Served from preloaded cache: ${url}`)
       }
@@ -544,7 +606,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     
     // Wait for network idle on new page - if successful, mark cycle as done
     try {
-      await newPage.waitForLoadState('networkidle', { timeout: 5000 })
+      await newPage.waitForLoadState('networkidle', { timeout: NEW_PAGE_NETWORKIDLE_TIMEOUT_MS })
       addDiag(`[NEW PAGE NETWORK IDLE] ${newPage.url()}`)
       
       // Network idle indicates successful completion
@@ -560,7 +622,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       const d = getProxyDelta()
       return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
     } catch (e) {
-      addDiag(`[NEW PAGE TIMEOUT] ${newPage.url()}`)
+      addDiag(`[TIMEOUT] New page networkidle after ${NEW_PAGE_NETWORKIDLE_TIMEOUT_MS}ms: ${e instanceof Error ? e.message : String(e)}`)
       // Ensure we don't hang here; close quickly
       try { await newPage.close({ runBeforeUnload: false }) } catch {}
     }
@@ -605,8 +667,8 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     addDiag(`[GOTO] ${TARGET_URL}`)
     await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: PAGE_GOTO_TIMEOUT_MS })
     } catch (e) {
-      logWarn(`[W${workerId}] [TIMEOUT] Page load timeout or error: ${e instanceof Error ? e.message : String(e)}`)
-      addDiag(`[GOTO ERROR] ${e instanceof Error ? e.message : String(e)}`)
+      logWarn(`[W${workerId}] [TIMEOUT] Page load timeout after ${PAGE_GOTO_TIMEOUT_MS}ms: ${e instanceof Error ? e.message : String(e)}`)
+      addDiag(`[TIMEOUT] Page goto after ${PAGE_GOTO_TIMEOUT_MS}ms: ${e instanceof Error ? e.message : String(e)}`)
     try {
       await page.close()
       await context.close()
@@ -709,7 +771,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
           isClosing = true
           // Extra delay to let the success request fully complete
           await new Promise(resolve => setTimeout(resolve, AFTER_SUCCESS_EXTRA_DELAY_MS))
-          try { await page.waitForLoadState('networkidle', { timeout: NETWORKIDLE_AFTER_SUCCESS_TIMEOUT_MS }) } catch (e) {}
+          try { await page.waitForLoadState('networkidle', { timeout: NETWORKIDLE_AFTER_SUCCESS_TIMEOUT_MS }) } catch (e) { addDiag(`[TIMEOUT] Page networkidle after success: ${e instanceof Error ? e.message : String(e)}`) }
           try { await browser.close() } catch (e) {}
           const d = getProxyDelta()
           return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
@@ -723,7 +785,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
           await new Promise(resolve => setTimeout(resolve, AFTER_SUCCESS_EXTRA_DELAY_MS))
         }
         try { await page.close() } catch (e) {}
-        try { await opened.waitForLoadState('domcontentloaded', { timeout: DOMCONTENTLOADED_TIMEOUT_SHORT_MS }).catch(() => {}) } catch (e) {}
+        try { await opened.waitForLoadState('domcontentloaded', { timeout: DOMCONTENTLOADED_TIMEOUT_SHORT_MS }).catch((e) => { addDiag(`[TIMEOUT] Popup domcontentloaded: ${e instanceof Error ? e.message : String(e)}`) }) } catch (e) { addDiag(`[ERROR] Popup domcontentloaded error: ${e instanceof Error ? e.message : String(e)}`) }
         try { await browser.close() } catch (e) {}
         const d = getProxyDelta()
         return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
@@ -735,7 +797,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         isClosing = true
         // Extra delay to let the success request fully complete
         await new Promise(resolve => setTimeout(resolve, AFTER_SUCCESS_EXTRA_DELAY_MS))
-        try { await page.waitForLoadState('networkidle', { timeout: NETWORKIDLE_AFTER_SUCCESS_TIMEOUT_SHORT_MS }) } catch (e) {}
+        try { await page.waitForLoadState('networkidle', { timeout: NETWORKIDLE_AFTER_SUCCESS_TIMEOUT_SHORT_MS }) } catch (e) { addDiag(`[TIMEOUT] Page networkidle after success (short): ${e instanceof Error ? e.message : String(e)}`) }
         try { await browser.close() } catch (e) {}
         const d = getProxyDelta()
         return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
@@ -903,11 +965,18 @@ async function main(): Promise<void> {
   logInfo(`Proxy Host: ${PROXY_HOST}, Ports: ${PROXY_PORT_START}-${PROXY_PORT_END}`)
   logInfo('============================\n')
   
-  // Start local filter proxy; route Node fetch directly via DataImpulse to avoid TLS MITM
-  startLocalFilterProxy()
-  if (PROXY_HOST && PROXY_PORT) {
-    const auth = PROXY_USER && PROXY_PASS ? `${encodeURIComponent(PROXY_USER)}:${encodeURIComponent(PROXY_PASS)}@` : ''
-    setGlobalDispatcher(new ProxyAgent(`http://${auth}${PROXY_HOST}:${PROXY_PORT}`))
+  // Configure proxy routing
+  if (!BYPASS_MITM) {
+    // Start local filter proxy and route Node fetch through upstream proxy (handled by ProxyAgent)
+    startLocalFilterProxy()
+    if (PROXY_HOST && PROXY_PORT) {
+      setGlobalDispatcher(upstreamAgent)
+    }
+  } else {
+    // Bypass local filter entirely: route browser and Node directly via upstream
+    if (PROXY_HOST && PROXY_PORT) {
+      setGlobalDispatcher(upstreamAgent)
+    }
   }
 
   // Preload cache before starting workers
