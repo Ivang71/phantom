@@ -1,5 +1,5 @@
 {
-  "name": "bot",
+  "name": "phantom",
   "version": "0.0.1",
   "main": "src/main.ts",
   "license": "MIT",
@@ -17,9 +17,6 @@
   },
   "dependencies": {
     "dotenv": "^17.2.2",
-    "http-mitm-proxy": "^1.1.0",
-    "http-proxy-agent": "^7.0.2",
-    "https-proxy-agent": "^7.0.6",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "undici": "^6.19.8",
