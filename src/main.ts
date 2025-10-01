@@ -3,7 +3,7 @@ const UserAgent = require('user-agents')
 import { config as loadEnv } from 'dotenv'
 import * as os from 'os'
 import { StatsManager } from './stats'
-const { ProxyAgent, setGlobalDispatcher } = require('undici')
+const { ProxyAgent, setGlobalDispatcher, fetch: undiciFetch } = require('undici')
 import * as net from 'net'
 
 loadEnv()
@@ -18,6 +18,13 @@ const PROXY_USER = process.env.PROXY_USER as string
 const PROXY_PASS = process.env.PROXY_PASS as string
 const MAX_ITERATIONS = 1000000000
 const WORKER_BATCH_SIZE = 500000000
+
+// Agent that routes Node requests through the local filter proxy,
+// ensuring parity with the browsing context's proxy path
+const localFilterAgent = new ProxyAgent(`http://127.0.0.1:${LOCAL_FILTER_PORT}`)
+
+// Toggle domain filtering for the local filter proxy (default: off)
+const DOMAIN_FILTERING = process.env.DOMAIN_FILTERING !== 'false'
 
 enum LogLevel {
   ERROR = 0,
@@ -55,7 +62,27 @@ const TARGET_URL = process.env.TARGET_URL as string
 const DEBUG_MODE = process.env.DEBUG_MODE === 'true'
 const DEBUG_MAX_WAIT_MS = Number(process.env.DEBUG_MAX_WAIT_MS || 20000)
 const NORMAL_MAX_WAIT_MS = Number(process.env.NORMAL_MAX_WAIT_MS || 15000)
-const TARGET_HOST = (() => { try { return new URL(TARGET_URL).hostname } catch { return '' } })()
+const TARGET_HOST = new URL(TARGET_URL).hostname
+
+// === Timing constants ===
+const VISIT_SITE_OVERALL_TIMEOUT_MS = 120000
+const PAGE_DEFAULT_TIMEOUT_MS = 15000
+const PAGE_DEFAULT_NAV_TIMEOUT_MS = 15000
+const PAGE_GOTO_TIMEOUT_MS = 7000
+const NEW_PAGE_NETWORKIDLE_TIMEOUT_MS = 5000
+const WAIT_FOR_FINAL_ON_PAGE_DEFAULT_MS = 17000
+
+const AD_DIV_MAX_WAIT_MS = 10000
+const AD_DIV_POLL_INTERVAL_MS = 500
+
+const PRE_CLICK_PREPARE_MS = 300
+const POST_CLICK_SHORT_WAIT_MS = 500
+const POPUP_DETECTION_GRACE_MS = 700
+
+const AFTER_SUCCESS_EXTRA_DELAY_MS = 300
+const NETWORKIDLE_AFTER_SUCCESS_TIMEOUT_MS = 400
+const NETWORKIDLE_AFTER_SUCCESS_TIMEOUT_SHORT_MS = 300
+const DOMCONTENTLOADED_TIMEOUT_SHORT_MS = 300
 
 // Centralized cache for frequently requested files
 const fileCache = new Map<string, { content: Buffer, contentType: string }>()
@@ -69,11 +96,11 @@ let globalProxyBytesDown = 0
 let globalProxyBlocked = 0
 
 function startLocalFilterProxy(): void {
-  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const allow = new RegExp(`(?:\\.|^)pcdelv\\.com$|(?:\\.|^)popcash\\.net$|^${esc(TARGET_HOST)}$`, 'i')
   const upstreamHost = PROXY_HOST
   const upstreamPort = PROXY_PORT
   const authHeader = (PROXY_USER || PROXY_PASS) ? 'Proxy-Authorization: Basic ' + Buffer.from(`${PROXY_USER}:${PROXY_PASS}`).toString('base64') + '\r\n' : ''
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const allow = new RegExp(`(?:\\.|^)pcdelv\\.com$|(?:\\.|^)popcash\\.net$|(?:\\.|^)ip-api\\.com$|^${esc(TARGET_HOST)}$`, 'i')
 
   const server = net.createServer((clientSocket) => {
     let bufferedFromClient: Buffer[] = []
@@ -105,8 +132,7 @@ function startLocalFilterProxy(): void {
             }
           }
         }
-
-        if (!allow.test(targetHost)) {
+        if (DOMAIN_FILTERING && !allow.test(targetHost)) {
           globalProxyBlocked++
           try { clientSocket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: 8\r\n\r\nfiltered') } catch {}
           try { clientSocket.destroy() } catch {}
@@ -173,7 +199,11 @@ function startLocalFilterProxy(): void {
   })
 
   server.listen(LOCAL_FILTER_PORT, () => {
-    logInfo(`[PROXY] Tunnel filter on :${LOCAL_FILTER_PORT} → ${PROXY_HOST}:${PROXY_PORT} (allow *.pcdelv.com *.popcash.net ${TARGET_HOST})`)
+    if (DOMAIN_FILTERING) {
+      logInfo(`[PROXY] Tunnel filter on :${LOCAL_FILTER_PORT} → ${PROXY_HOST}:${PROXY_PORT} (domain filtering enabled: *.pcdelv.com, *.popcash.net, ip-api.com, ${TARGET_HOST})`)
+    } else {
+      logInfo(`[PROXY] Tunnel filter on :${LOCAL_FILTER_PORT} → ${PROXY_HOST}:${PROXY_PORT} (no domain filtering - all requests allowed)`)
+    }
   })
 }
 
@@ -276,7 +306,7 @@ async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSe
   return Promise.race([
     visitSiteInternal(proxyPort, workerId),
     new Promise<{ bytesSent: number, bytesReceived: number, success: boolean }>((_, reject) =>
-      setTimeout(() => reject(new Error('visitSite timeout after 120 seconds')), 120000)
+      setTimeout(() => reject(new Error(`visitSite timeout after ${VISIT_SITE_OVERALL_TIMEOUT_MS} ms`)), VISIT_SITE_OVERALL_TIMEOUT_MS)
     )
   ]).catch(async (error) => {
     logError(`[W${workerId}] [TIMEOUT] visitSite timed out or errored: ${error instanceof Error ? error.message : String(error)}`)
@@ -298,20 +328,16 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   })
 
   async function detectGeoViaProxy(): Promise<{ countryCode: string, timezone: string, lat: number, lon: number }> {
-    const tmp = await browser.newContext()
-    try {
-      const p = await tmp.newPage()
-      const info = await p.evaluate(async () => {
-        const r = await fetch('http://ip-api.com/json?fields=status,countryCode,timezone,lat,lon', { cache: 'no-store' })
-        return await r.json()
-      })
-      if (info && info.status === 'success' && info.countryCode && info.timezone) {
-        return { countryCode: info.countryCode as string, timezone: info.timezone as string, lat: Number(info.lat), lon: Number(info.lon) }
-      }
-      throw new Error('Geo lookup failed')
-    } finally {
-      try { tmp.close() } catch (e) {}
+    const url = 'http://ip-api.com/json?fields=status,countryCode,timezone,lat,lon'
+    const response = await undiciFetch(url, { dispatcher: localFilterAgent })
+    if (!response.ok) {
+      throw new Error(`Geo lookup HTTP ${response.status}`)
     }
+    const info: any = await response.json()
+    if (info && info.status === 'success' && info.countryCode && info.timezone) {
+      return { countryCode: String(info.countryCode), timezone: String(info.timezone), lat: Number(info.lat), lon: Number(info.lon) }
+    }
+    throw new Error('Geo lookup failed')
   }
 
   function localeFromCountry(countryCode: string): string {
@@ -353,7 +379,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     }
   }
 
-  async function waitForFinalOnPage(p: any, timeoutMs = 17000): Promise<boolean> {
+  async function waitForFinalOnPage(p: any, timeoutMs = WAIT_FOR_FINAL_ON_PAGE_DEFAULT_MS): Promise<boolean> {
     return new Promise((resolve) => {
       let done = false
       const onReq = (req: any) => {
@@ -572,12 +598,12 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       // Browser detection logs removed for performance
   })
   
-  page.setDefaultTimeout(15000)
-  page.setDefaultNavigationTimeout(15000)
+  page.setDefaultTimeout(PAGE_DEFAULT_TIMEOUT_MS)
+  page.setDefaultNavigationTimeout(PAGE_DEFAULT_NAV_TIMEOUT_MS)
 
   try {
     addDiag(`[GOTO] ${TARGET_URL}`)
-    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 7000 })
+    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: PAGE_GOTO_TIMEOUT_MS })
     } catch (e) {
       logWarn(`[W${workerId}] [TIMEOUT] Page load timeout or error: ${e instanceof Error ? e.message : String(e)}`)
       addDiag(`[GOTO ERROR] ${e instanceof Error ? e.message : String(e)}`)
@@ -612,10 +638,10 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     2) Pop-up: a new window opens and starts the redirect chain; it becomes focused.
        Action: close the original TARGET_URL page and wait for the redirect chain to finish in the new window.
   */
-  // Wait for ad div to mount with polling (max 7s)
+  // Wait for ad div to mount with polling
   let targetDiv = null
-  const maxWaitTime = 10000
-  const pollInterval = 500
+  const maxWaitTime = AD_DIV_MAX_WAIT_MS
+  const pollInterval = AD_DIV_POLL_INTERVAL_MS
   const startTime = Date.now()
   
   while (!targetDiv && (Date.now() - startTime) < maxWaitTime) {
@@ -655,15 +681,15 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       }
     } catch (e) {}
     
-    await page.waitForTimeout(300)
+    await page.waitForTimeout(PRE_CLICK_PREPARE_MS)
     const pagesBefore = context.pages()
     // Single decisive click
     try { await targetDiv.click({ force: true }); addDiag('[CLICK] targetDiv clicked') } catch (e) { addDiag(`[CLICK ERROR] ${e instanceof Error ? e.message : String(e)}`) }
-    await page.waitForTimeout(500)
+    await page.waitForTimeout(POST_CLICK_SHORT_WAIT_MS)
     
     // Detect outcome
     // Small grace period for popups/tabs to appear
-    await page.waitForTimeout(700)
+    await page.waitForTimeout(POPUP_DETECTION_GRACE_MS)
     const pagesAfter = context.pages()
     const opened = pagesAfter.find(p => !pagesBefore.includes(p))
     
@@ -682,8 +708,8 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         if (wasSuccessful) {
           isClosing = true
           // Extra delay to let the success request fully complete
-          await new Promise(resolve => setTimeout(resolve, 500))
-          try { await page.waitForLoadState('networkidle', { timeout: 400 }) } catch (e) {}
+          await new Promise(resolve => setTimeout(resolve, AFTER_SUCCESS_EXTRA_DELAY_MS))
+          try { await page.waitForLoadState('networkidle', { timeout: NETWORKIDLE_AFTER_SUCCESS_TIMEOUT_MS }) } catch (e) {}
           try { await browser.close() } catch (e) {}
           const d = getProxyDelta()
           return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
@@ -694,10 +720,10 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         try { addDiag('[WAIT] final on popup'); wasSuccessful = await waitForFinalOnPage(opened, DEBUG_MODE ? DEBUG_MAX_WAIT_MS : NORMAL_MAX_WAIT_MS); addDiag(`[WAIT DONE] success=${wasSuccessful}`) } catch (e) { addDiag(`[WAIT ERROR] ${e instanceof Error ? e.message : String(e)}`) }
         // Extra delay to let the success request fully complete
         if (wasSuccessful) {
-          await new Promise(resolve => setTimeout(resolve, 500))
+          await new Promise(resolve => setTimeout(resolve, AFTER_SUCCESS_EXTRA_DELAY_MS))
         }
         try { await page.close() } catch (e) {}
-        try { await opened.waitForLoadState('domcontentloaded', { timeout: 300 }).catch(() => {}) } catch (e) {}
+        try { await opened.waitForLoadState('domcontentloaded', { timeout: DOMCONTENTLOADED_TIMEOUT_SHORT_MS }).catch(() => {}) } catch (e) {}
         try { await browser.close() } catch (e) {}
         const d = getProxyDelta()
         return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
@@ -708,8 +734,8 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       if (wasSuccessful) {
         isClosing = true
         // Extra delay to let the success request fully complete
-        await new Promise(resolve => setTimeout(resolve, 500))
-        try { await page.waitForLoadState('networkidle', { timeout: 300 }) } catch (e) {}
+        await new Promise(resolve => setTimeout(resolve, AFTER_SUCCESS_EXTRA_DELAY_MS))
+        try { await page.waitForLoadState('networkidle', { timeout: NETWORKIDLE_AFTER_SUCCESS_TIMEOUT_SHORT_MS }) } catch (e) {}
         try { await browser.close() } catch (e) {}
         const d = getProxyDelta()
         return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
