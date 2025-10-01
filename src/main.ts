@@ -334,7 +334,11 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   let isClosing = false
   let wasSuccessful = false
   const diagEvents: string[] = []
-  const addDiag = (m: string) => { if (DEBUG_MODE) diagEvents.push(`[W${workerId}] ${new Date().toISOString()} ${m}`) }
+  const addDiag = (m: string) => {
+    // Always retain diagnostics; in non-debug keep a small rolling window
+    diagEvents.push(`[W${workerId}] ${new Date().toISOString()} ${m}`)
+    if (!DEBUG_MODE && diagEvents.length > 200) diagEvents.shift()
+  }
   const getProxyDelta = (): { bytesSent: number, bytesReceived: number } => ({
     bytesSent: Math.max(0, globalProxyBytesUp - startProxyUp),
     bytesReceived: Math.max(0, globalProxyBytesDown - startProxyDown)
@@ -828,13 +832,26 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   } catch (e) {}
   
   if (!wasSuccessful) {
+    const d = getProxyDelta()
     if (DEBUG_MODE) {
-      const d = getProxyDelta()
       console.log(`[W${workerId}] DEBUG FAIL bytesUp=${formatBytes(d.bytesSent)} bytesDown=${formatBytes(d.bytesReceived)} events=${diagEvents.length}`)
       for (const e of diagEvents) console.log(e)
     }
     if (LOG_MODE === 'prod') {
-      console.log(`[W${workerId}] FAIL`)
+      // Summarize likely reasons
+      const findLast = (pred: (s: string) => boolean) => {
+        for (let i = diagEvents.length - 1; i >= 0; i--) if (pred(diagEvents[i])) return diagEvents[i]
+        return undefined
+      }
+      const lastTimeout = findLast(s => s.includes('[TIMEOUT]'))
+      const lastRouteErr = findLast(s => s.includes('[ROUTE ERROR]'))
+      const lastReqFailed = findLast(s => s.includes('[REQ FAILED]'))
+      const lastHTTP4xx = findLast(s => /\[RESP\]\s+4\d\d\b/.test(s))
+      const lastHTTP5xx = findLast(s => /\[RESP\]\s+5\d\d\b/.test(s))
+      const reason = lastTimeout || lastRouteErr || lastReqFailed || lastHTTP5xx || lastHTTP4xx || 'unknown'
+      const tail = diagEvents.slice(-5).join(' | ')
+      console.log(`[W${workerId}] FAIL bytesUp=${formatBytes(d.bytesSent)} bytesDown=${formatBytes(d.bytesReceived)} reason=${typeof reason === 'string' ? reason : 'unknown'}`)
+      if (tail) console.log(`[W${workerId}] FAIL tail: ${tail}`)
     }
   }
   
