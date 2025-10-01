@@ -4,13 +4,12 @@ import { config as loadEnv } from 'dotenv'
 import * as os from 'os'
 import { StatsManager } from './stats'
 const { ProxyAgent, setGlobalDispatcher, fetch: undiciFetch } = require('undici')
-import * as net from 'net'
 
 loadEnv()
 
 const PROXY_PORT_START = 10000
 const PROXY_PORT_END = 20000
-const LOCAL_FILTER_PORT = Number(process.env.LOCAL_FILTER_PORT || 8000)
+// Local filter proxy removed
 const MAX_CONCURRENT_WORKERS = Number(process.env.NUMBER_OF_WORKERS)
 const PROXY_HOST = process.env.PROXY_HOST as string
 const PROXY_PORT = Number(process.env.PROXY_PORT)
@@ -19,15 +18,7 @@ const PROXY_PASS = process.env.PROXY_PASS as string
 const MAX_ITERATIONS = 1000000000
 const WORKER_BATCH_SIZE = 500000000
 
-// Agent that routes Node requests through the local filter proxy,
-// ensuring parity with the browsing context's proxy path
-const localFilterAgent = new ProxyAgent(`http://127.0.0.1:${LOCAL_FILTER_PORT}`)
-
-// Toggle domain filtering for the local filter proxy (default: on)
-const DOMAIN_FILTERING = process.env.DOMAIN_FILTERING !== 'false'
-
-// Toggle bypass of the local MITM filter proxy (default: off)
-const BYPASS_MITM = process.env.BYPASS_MITM === 'true'
+// Local filter/MITM removed; traffic goes directly via upstream proxy
 
 // Upstream proxy agent (DataImpulse) built from env
 const upstreamProxyAuth = (PROXY_USER && PROXY_PASS) ? `${encodeURIComponent(PROXY_USER)}:${encodeURIComponent(PROXY_PASS)}@` : ''
@@ -100,119 +91,6 @@ const CACHED_FILES = [
 
 let globalProxyBytesUp = 0
 let globalProxyBytesDown = 0
-let globalProxyBlocked = 0
-
-function startLocalFilterProxy(): void {
-  const upstreamHost = PROXY_HOST
-  const upstreamPort = PROXY_PORT
-  const authHeader = (PROXY_USER || PROXY_PASS) ? 'Proxy-Authorization: Basic ' + Buffer.from(`${PROXY_USER}:${PROXY_PASS}`).toString('base64') + '\r\n' : ''
-  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const allow = new RegExp(`(?:\\.|^)pcdelv\\.com$|(?:\\.|^)popcash\\.net$|(?:\\.|^)ip-api\\.com$|^${esc(TARGET_HOST)}$`, 'i')
-
-  const server = net.createServer((clientSocket) => {
-    let bufferedFromClient: Buffer[] = []
-    let tunnelEstablished = false
-    let isConnect = false
-    let targetHost = ''
-    let targetPort = 443
-
-    const flush = () => { for (const b of bufferedFromClient) try { upstream.write(b) } catch {} bufferedFromClient = [] }
-    let upstream: net.Socket
-
-    clientSocket.once('data', (firstChunk: Buffer) => {
-      try {
-        const reqText = firstChunk.toString('utf8')
-        const firstLineEnd = reqText.indexOf('\r\n')
-        const firstLine = firstLineEnd >= 0 ? reqText.slice(0, firstLineEnd) : ''
-        isConnect = firstLine.startsWith('CONNECT ')
-        if (isConnect) {
-          const m = firstLine.match(/^CONNECT\s+([^:\s]+):(\d+)/i)
-          if (m) { targetHost = m[1]; targetPort = Number(m[2]) || 443 }
-        } else {
-          const m = firstLine.match(/^[A-Z]+\s+https?:\/\/([^\/:\s]+)(?::(\d+))?/i)
-          if (m) { targetHost = m[1]; if (m[2]) targetPort = Number(m[2]) }
-          if (!targetHost) {
-            const hostMatch = reqText.match(/\r\nHost:\s*([^\r\n]+)/i)
-            if (hostMatch) {
-              const hp = hostMatch[1].trim().split(':')
-              targetHost = hp[0]; if (hp[1]) targetPort = Number(hp[1])
-            }
-          }
-        }
-        if (DOMAIN_FILTERING && !allow.test(targetHost)) {
-          globalProxyBlocked++
-          try { clientSocket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: 8\r\n\r\nfiltered') } catch {}
-          try { clientSocket.destroy() } catch {}
-          return
-        }
-
-        upstream = net.connect({ host: upstreamHost, port: upstreamPort }, () => {
-          if (isConnect) {
-            const connectReq = `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\n${authHeader}\r\n`
-            upstream.write(connectReq)
-          } else {
-            let proxyReq = reqText
-            if (!/\r\nProxy-Authorization:/i.test(proxyReq) && authHeader) {
-              proxyReq = proxyReq.replace(/\r\n\r\n/, `\r\n${authHeader}\r\n`)
-            }
-            upstream.write(Buffer.from(proxyReq, 'utf8'))
-          }
-        })
-
-        // Counters
-        clientSocket.on('data', (d) => { globalProxyBytesUp += d.length })
-        upstream.on('data', (d) => { globalProxyBytesDown += d.length })
-
-        upstream.on('data', (data) => {
-          if (isConnect && !tunnelEstablished) {
-            const resp = data.toString('utf8')
-            const headerEnd = resp.indexOf('\r\n\r\n')
-            if (headerEnd !== -1) {
-              if (/^HTTP\/1\.[01]\s+200/i.test(resp)) {
-                tunnelEstablished = true
-                try { clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n') } catch {}
-                const remain = data.slice(headerEnd + 4)
-                if (remain.length) clientSocket.write(remain)
-                flush()
-                return
-              } else {
-                try { clientSocket.write(data) } catch {}
-                try { clientSocket.destroy() } catch {}
-                try { upstream.destroy() } catch {}
-                return
-              }
-            }
-          } else {
-            clientSocket.write(data)
-          }
-        })
-
-        upstream.on('error', () => { try { clientSocket.destroy() } catch {} })
-        clientSocket.on('error', () => { try { upstream.destroy() } catch {} })
-        clientSocket.on('close', () => { try { upstream.destroy() } catch {} })
-        upstream.on('close', () => { try { clientSocket.destroy() } catch {} })
-
-        clientSocket.on('data', (data) => {
-          if (isConnect && !tunnelEstablished) {
-            bufferedFromClient.push(data)
-          } else {
-            upstream.write(data)
-          }
-        })
-      } catch {
-        try { clientSocket.destroy() } catch {}
-      }
-    })
-  })
-
-  server.listen(LOCAL_FILTER_PORT, () => {
-    if (DOMAIN_FILTERING) {
-      logInfo(`[PROXY] Tunnel filter on :${LOCAL_FILTER_PORT} → ${PROXY_HOST}:${PROXY_PORT} (domain filtering enabled: *.pcdelv.com, *.popcash.net, ip-api.com, ${TARGET_HOST})`)
-    } else {
-      logInfo(`[PROXY] Tunnel filter on :${LOCAL_FILTER_PORT} → ${PROXY_HOST}:${PROXY_PORT} (no domain filtering - all requests allowed)`)
-    }
-  })
-}
 
 async function preloadCache(): Promise<void> {
   logInfo('=== PRELOADING CACHE ===')
@@ -265,14 +143,9 @@ function getSystemInfo() {
 }
 
 async function createBrowserWithProxy(proxyPort: number) {
-  let proxyConfig: any
-  if (BYPASS_MITM) {
-    proxyConfig = {
-      server: `http://${PROXY_HOST}:${proxyPort}`,
-      ...(PROXY_USER && PROXY_PASS && { username: PROXY_USER, password: PROXY_PASS })
-    }
-  } else {
-    proxyConfig = { server: `http://127.0.0.1:${LOCAL_FILTER_PORT}` }
+  const proxyConfig: any = {
+    server: `http://${PROXY_HOST}:${proxyPort}`,
+    ...(PROXY_USER && PROXY_PASS && { username: PROXY_USER, password: PROXY_PASS })
   }
   
   return await chromium.launch({
@@ -346,9 +219,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
 
   async function detectGeoViaProxy(): Promise<{ countryCode: string, timezone: string, lat: number, lon: number }> {
     const url = 'http://ip-api.com/json?fields=status,countryCode,timezone,lat,lon'
-    const dispatcher = BYPASS_MITM
-      ? new ProxyAgent(`http://${upstreamProxyAuth}${PROXY_HOST}:${proxyPort}`)
-      : localFilterAgent
+    const dispatcher = new ProxyAgent(`http://${upstreamProxyAuth}${PROXY_HOST}:${proxyPort}`)
     const response = await undiciFetch(url, { dispatcher })
     if (!response.ok) {
       throw new Error(`Geo lookup HTTP ${response.status}`)
@@ -948,7 +819,8 @@ async function printStats(): Promise<void> {
   logInfo(`Global Iterations: ${Array.from(workerStats.values()).reduce((sum, s) => sum + s.iterations, 0)}`)
   logInfo(`Global Errors: ${Array.from(workerStats.values()).reduce((sum, s) => sum + s.errors, 0)}`)
   logInfo(`Global Network: Sent ${formatBytes(globalBytesSent)}, Received ${formatBytes(globalBytesReceived)}`)
-  logInfo(`[PROXY] Filter Totals: Up ${formatBytes(globalProxyBytesUp)}, Down ${formatBytes(globalProxyBytesDown)}, Blocked ${globalProxyBlocked}`)
+  // Filter proxy removed; keep global up/down counters if still tracked elsewhere
+  logInfo(`[PROXY] Traffic Totals: Up ${formatBytes(globalProxyBytesUp)}, Down ${formatBytes(globalProxyBytesDown)}`)
   logInfo(`Cache Performance: ${globalCacheHits} hits, ${formatBytes(globalCacheBytesSaved)} saved`)
   logInfo(`Memory: RSS ${memUsage.rss}MB, Heap ${memUsage.heapUsed}MB`)
   logInfo(`System Memory: ${sysInfo.freeMemory}GB free of ${sysInfo.totalMemory}GB`)
@@ -982,18 +854,9 @@ async function main(): Promise<void> {
   logInfo(`Proxy Host: ${PROXY_HOST}, Ports: ${PROXY_PORT_START}-${PROXY_PORT_END}`)
   logInfo('============================\n')
   
-  // Configure proxy routing
-  if (!BYPASS_MITM) {
-    // Start local filter proxy and route Node fetch through upstream proxy (handled by ProxyAgent)
-    startLocalFilterProxy()
-    if (PROXY_HOST && PROXY_PORT) {
-      setGlobalDispatcher(upstreamAgent)
-    }
-  } else {
-    // Bypass local filter entirely: route browser and Node directly via upstream
-    if (PROXY_HOST && PROXY_PORT) {
-      setGlobalDispatcher(upstreamAgent)
-    }
+  // Route Node fetch directly via upstream proxy
+  if (PROXY_HOST && PROXY_PORT) {
+    setGlobalDispatcher(upstreamAgent)
   }
 
   // Preload cache before starting workers
