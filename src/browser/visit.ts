@@ -84,10 +84,22 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
 
   const page = await context.newPage()
 
+  // Single external hop control
+  const INTERNAL_HOSTS = [
+    'pcdelv.com',
+    '.pcdelv.com',
+    'popcash.net',
+    '.popcash.net',
+    new URL(TARGET_URL).hostname
+  ]
+  let externalHost: string | null = null
+  let externalHit = false
+
   await page.route('**/*', async (route) => {
     try {
       const url = route.request().url()
       addDiag(`[ROUTE] ${url}`)
+      // Serve from cache if available
       if (CACHED_FILES.includes(url)) {
         if (fileCache.has(url)) {
           const cached = fileCache.get(url)!
@@ -102,7 +114,27 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
           return
         }
       }
-      await route.continue()
+
+      // Domain-based allowlist with exactly one external hop after /cl
+      const host = new URL(url).hostname.toLowerCase()
+      const isInternal = INTERNAL_HOSTS.some(d => host === d.replace(/^\./, '') || host.endsWith(d))
+
+      if (isInternal) {
+        return await route.continue()
+      }
+
+      if (externalHost && host === externalHost) {
+        if (!externalHit) {
+          externalHit = true
+          addDiag(`[ALLOW ONCE] external ${host}`)
+          return await route.continue()
+        }
+        addDiag(`[ABORT] subsequent external ${host}`)
+        return await route.abort()
+      }
+
+      addDiag(`[ABORT] non-internal ${host}`)
+      return await route.abort()
     } catch (e) {
       logDebug(`[W${workerId}] [ROUTE ERROR] ${route.request().url()}: ${e instanceof Error ? e.message : String(e)}`)
       addDiag(`[ROUTE ERROR] ${route.request().url()} ${e instanceof Error ? e.message : String(e)}`)
@@ -143,25 +175,21 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         isCacheHit = true
       }
       logDebug(`[W${workerId}] [RESPONSE] ${status} ${url}`)
-      if (url.includes('p.pcdelv.com/v2/') && url.endsWith('/cl') && status >= 300 && status < 400) {
+      // Discover external host from /cl Location header
+      if (url.includes('/cl') && status >= 300 && status < 400) {
         try {
           const headers = response.headers() as any
-          const loc = headers['location'] || headers['Location']
-          if (loc && typeof loc === 'string') {
-            let host: string | undefined
+          let loc: string | undefined = (headers['location'] || headers['Location']) as any
+          if (!loc) { /* no-op */ }
+          else {
+            if (loc.startsWith('//')) loc = 'http:' + loc
+            if (!loc.startsWith('http')) loc = new URL(loc, url).href
             try {
-              if (loc.startsWith('http://') || loc.startsWith('https://')) {
-                host = new URL(loc).hostname
-              } else if (loc.startsWith('//')) {
-                host = new URL('http:' + loc).hostname
-              }
-            } catch (e) {}
-            const isInternal = host ? (host.toLowerCase().endsWith('pcdelv.com') || host.toLowerCase().endsWith('popcash.net')) : true
-            if (!isInternal) {
-              wasSuccessful = true
-              logInfo(`[W${workerId}] [SUCCESS] External redirect after /cl: ${url} → ${loc}`)
-              addDiag(`[SUCCESS] ${url} → ${loc}`)
-            }
+              const discoveredHost = new URL(loc).hostname.toLowerCase()
+              externalHost = discoveredHost
+              logInfo(`[W${workerId}] [ALLOW ONCE] external host set to ${externalHost}`)
+              addDiag(`[ALLOW ONCE] external host ${externalHost}`)
+            } catch {}
           }
         } catch (e) {}
       }
@@ -173,6 +201,25 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         logDebug(`[W${workerId}] [RESPONSE ERROR] ${response.url()}: ${e instanceof Error ? e.message : String(e)}`)
       }
     }
+  })
+
+  // External hop timeout guard
+  const EXTERNAL_TIMEOUT = 7000
+  page.waitForRequest(req => {
+    try {
+      return !!externalHost && new URL(req.url()).hostname.toLowerCase() === externalHost
+    } catch { return false }
+  }, { timeout: EXTERNAL_TIMEOUT }).catch(() => logWarn(`[W${workerId}] external hop never happened`))
+
+  // Abort all network after the single external request completes
+  page.on('requestfinished', (req) => {
+    try {
+      const host = new URL(req.url()).hostname.toLowerCase()
+      if (externalHit && externalHost && host === externalHost) {
+        addDiag('[SHUTDOWN] external hop done, aborting further requests')
+        page.route('**/*', r => r.abort())
+      }
+    } catch {}
   })
 
   context.on('page', async (newPage) => {
@@ -296,6 +343,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
           return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
         }
       } else {
+        console.log('[INFO] Suppusedly popup opened')
         try { await opened.bringToFront() } catch {}
         try { addDiag('[WAIT] final on popup'); wasSuccessful = await waitForFinalOnPage(opened, DEBUG_MODE ? DEBUG_MAX_WAIT_MS : NORMAL_MAX_WAIT_MS); addDiag(`[WAIT DONE] success=${wasSuccessful}`) } catch (e) { addDiag(`[WAIT ERROR] ${e instanceof Error ? e.message : String(e)}`) }
         if (wasSuccessful) {
@@ -307,6 +355,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
       }
     } else {
+      console.log('[INFO] Suppusedly waiting on the same apge')
       try { addDiag('[WAIT] final on same page'); wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? DEBUG_MAX_WAIT_MS : NORMAL_MAX_WAIT_MS); addDiag(`[WAIT DONE] success=${wasSuccessful}`) } catch (e) { addDiag(`[WAIT ERROR] ${e instanceof Error ? e.message : String(e)}`) }
       if (wasSuccessful) {
         isClosing = true
