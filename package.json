@@ -1,19 +1,22 @@
 {
   "name": "phantom",
   "version": "0.0.1",
-  "main": "src/main.ts",
+  "main": "src/index.ts",
   "license": "MIT",
   "scripts": {
-    "debug": "export LOG_MODE=debug DEBUG_MODE=true && ts-node src/main.ts",
-    "dev": "export LOG_MODE=debug && ts-node src/main.ts",
-    "prod": "export LOG_MODE=prod && tsc && node dist/main.js"
+    "debug": "export LOG_MODE=debug DEBUG_MODE=true && node -r ts-node/register -r tsconfig-paths/register src/index.ts",
+    "dev": "export LOG_MODE=debug && node -r ts-node/register -r tsconfig-paths/register src/index.ts",
+    "build": "tsc && tsc-alias",
+    "prod": "export LOG_MODE=prod && yarn build && node dist/index.js"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
     "@types/user-agents": "^1.0.4",
     "playwright": "^1.55.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "tsc-alias": "^1.8.10"
   },
   "dependencies": {
     "dotenv": "^17.2.2",
