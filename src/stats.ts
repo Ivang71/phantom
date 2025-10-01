@@ -1,5 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
+import { getIpExtOctetsSinceRunBaseline } from '@/network/netstat'
 
 export interface BotStats {
   startTime: number
@@ -31,10 +32,15 @@ export class StatsManager {
   private statsFile: string
   private stats: BotStats
   private saveInterval: NodeJS.Timeout | null = null
+  private runStartTotalSent: number = 0
+  private runStartTotalReceived: number = 0
 
   constructor(statsFilePath: string = './bot-stats.json') {
     this.statsFile = path.resolve(statsFilePath)
     this.stats = this.loadStats()
+    // Anchor totals for this run so that cumulative totals persist across restarts
+    this.runStartTotalSent = this.stats.totalDataSent || 0
+    this.runStartTotalReceived = this.stats.totalDataReceived || 0
     this.startAutoSave()
   }
 
@@ -93,6 +99,20 @@ export class StatsManager {
     }
   }
 
+  private updateBytesFromNetstat(): void {
+    const sinceRun = getIpExtOctetsSinceRunBaseline()
+    // Cumulative totals: persisted totals at run start + since-run deltas
+    this.stats.totalDataSent = this.runStartTotalSent + sinceRun.outOctets
+    this.stats.totalDataReceived = this.runStartTotalReceived + sinceRun.inOctets
+    this.stats.totalDataSentReadable = this.formatBytes(this.stats.totalDataSent)
+    this.stats.totalDataReceivedReadable = this.formatBytes(this.stats.totalDataReceived)
+    // Session reflects current run only
+    this.stats.sessionStats.sessionDataSent = sinceRun.outOctets
+    this.stats.sessionStats.sessionDataReceived = sinceRun.inOctets
+    this.stats.sessionStats.sessionDataSentReadable = this.formatBytes(this.stats.sessionStats.sessionDataSent)
+    this.stats.sessionStats.sessionDataReceivedReadable = this.formatBytes(this.stats.sessionStats.sessionDataReceived)
+  }
+
   private saveStats(): void {
     try {
       // Update runtime
@@ -108,7 +128,7 @@ export class StatsManager {
         this.stats.averageCyclesPerMinute = this.stats.successfulCycles / runtimeMinutes
       }
 
-      // Update session stats
+      // Update session stats runtime and cycles/min
       const sessionRuntime = now - this.stats.sessionStats.sessionStartTime
       this.stats.sessionStats.sessionRuntimeReadable = this.formatTime(sessionRuntime)
       const sessionRuntimeMinutes = sessionRuntime / (1000 * 60)
@@ -116,11 +136,8 @@ export class StatsManager {
         this.stats.sessionStats.sessionCyclesPerMinute = this.stats.sessionStats.sessionCycles / sessionRuntimeMinutes
       }
 
-      // Update readable data amounts
-      this.stats.totalDataSentReadable = this.formatBytes(this.stats.totalDataSent)
-      this.stats.totalDataReceivedReadable = this.formatBytes(this.stats.totalDataReceived)
-      this.stats.sessionStats.sessionDataSentReadable = this.formatBytes(this.stats.sessionStats.sessionDataSent)
-      this.stats.sessionStats.sessionDataReceivedReadable = this.formatBytes(this.stats.sessionStats.sessionDataReceived)
+      // Sync bytes from system IpExt since run baseline
+      this.updateBytesFromNetstat()
 
       fs.writeFileSync(this.statsFile, JSON.stringify(this.stats, null, 2))
     } catch (error) {
@@ -137,21 +154,18 @@ export class StatsManager {
 
   public recordSuccessfulCycle(bytesSent: number, bytesReceived: number): void {
     this.stats.successfulCycles++
-    this.stats.totalDataSent += bytesSent
-    this.stats.totalDataReceived += bytesReceived
-    
+    // Keep cycle counters; bytes now come from system netstat in saveStats/getStats
     this.stats.sessionStats.sessionCycles++
-    this.stats.sessionStats.sessionDataSent += bytesSent
-    this.stats.sessionStats.sessionDataReceived += bytesReceived
   }
 
   public getStats(): BotStats {
-    // Update runtime before returning
+    // Update runtime and recompute bytes before returning to keep printouts in sync
     this.stats.totalRuntime = Date.now() - this.stats.startTime
     const runtimeMinutes = this.stats.totalRuntime / (1000 * 60)
     if (runtimeMinutes > 0) {
       this.stats.averageCyclesPerMinute = this.stats.successfulCycles / runtimeMinutes
     }
+    this.updateBytesFromNetstat()
     return { ...this.stats }
   }
 

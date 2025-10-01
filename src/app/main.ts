@@ -5,15 +5,20 @@ import { logInfo } from '@/logger'
 import { routeNodeFetchViaProxy } from '@/network/proxy'
 import { runWorker, workerStats, globalBytesReceived, globalBytesSent } from '@/workers'
 import { StatsManager } from '@/stats'
+import { getIpExtOctetsTotals, getIpExtOctetsSinceRunBaseline, resetIpExtRunBaseline } from '@/network/netstat'
 
 async function printStats(statsManager: StatsManager): Promise<void> {
   const memUsage = getMemoryUsage()
   const sysInfo = getSystemInfo()
+  const ipExtTotals = getIpExtOctetsTotals()
+  const ipExtSinceRun = getIpExtOctetsSinceRunBaseline()
   logInfo('\n=== PARALLEL EXECUTION STATS ===')
   logInfo(`Active Workers: ${workerStats.size}`)
   logInfo(`Global Iterations: ${Array.from(workerStats.values()).reduce((sum, s) => sum + s.iterations, 0)}`)
   logInfo(`Global Errors: ${Array.from(workerStats.values()).reduce((sum, s) => sum + s.errors, 0)}`)
   logInfo(`Global Network: Sent ${formatBytes(globalBytesSent)}, Received ${formatBytes(globalBytesReceived)}`)
+  logInfo(`System Net (IpExt totals): Out ${formatBytes(ipExtTotals.outOctets)}, In ${formatBytes(ipExtTotals.inOctets)}`)
+  logInfo(`System Net (since start): Out ${formatBytes(ipExtSinceRun.outOctets)}, In ${formatBytes(ipExtSinceRun.inOctets)}`)
   logInfo(`Cache Performance: ${globalCacheHits} hits, ${formatBytes(globalCacheBytesSaved)} saved`)
   logInfo(`Memory: RSS ${memUsage.rss}MB, Heap ${memUsage.heapUsed}MB`)
   logInfo(`System Memory: ${sysInfo.freeMemory}GB free of ${sysInfo.totalMemory}GB`)
@@ -28,6 +33,7 @@ async function printStats(statsManager: StatsManager): Promise<void> {
 
 export async function main(): Promise<void> {
   const statsManager = new StatsManager('./bot-stats.json')
+  resetIpExtRunBaseline()
   logInfo('=== PARALLEL BOT SYSTEM ===')
   const sysInfo = getSystemInfo()
   logInfo(`Platform: ${sysInfo.platform} ${sysInfo.arch}`)

@@ -25,7 +25,6 @@ import { fileCache, CACHED_FILES, recordCacheHit } from '@/cache'
 import { detectGeoViaProxy, localeFromCountry } from '@/network/geo'
 import { formatBytes } from '@/utils'
 import { LogLevel, logDebug, logError, logInfo, logWarn } from '@/logger'
-import { globalProxyBytesDown, globalProxyBytesUp } from '@/network/metrics'
 
 export async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSent: number, bytesReceived: number, success: boolean }> {
   return Promise.race([
@@ -40,8 +39,6 @@ export async function visitSite(proxyPort: number, workerId: number): Promise<{ 
 }
 
 async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{ bytesSent: number, bytesReceived: number, success: boolean }> {
-  const startProxyUp = globalProxyBytesUp
-  const startProxyDown = globalProxyBytesDown
   const browser = await createBrowserWithProxy(proxyPort)
   let isClosing = false
   let wasSuccessful = false
@@ -50,10 +47,6 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     diagEvents.push(`[W${workerId}] ${new Date().toISOString()} ${m}`)
     if (!DEBUG_MODE && diagEvents.length > 200) diagEvents.shift()
   }
-  const getProxyDelta = (): { bytesSent: number, bytesReceived: number } => ({
-    bytesSent: Math.max(0, globalProxyBytesUp - startProxyUp),
-    bytesReceived: Math.max(0, globalProxyBytesDown - startProxyDown)
-  })
 
   try {
     const version = await browser.version()
@@ -194,8 +187,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       try { await page.close() } catch {}
       try { await context.close() } catch {}
       try { await browser.close() } catch {}
-      const d = getProxyDelta()
-      return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
+      return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
     } catch (e) {
       addDiag(`[TIMEOUT] New page networkidle after ${NEW_PAGE_NETWORKIDLE_TIMEOUT_MS}ms: ${e instanceof Error ? e.message : String(e)}`)
       try { await newPage.close({ runBeforeUnload: false }) } catch {}
@@ -230,11 +222,10 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     logWarn(`[W${workerId}] [TIMEOUT] Page load timeout after ${PAGE_GOTO_TIMEOUT_MS}ms: ${e instanceof Error ? e.message : String(e)}`)
     addDiag(`[TIMEOUT] Page goto after ${PAGE_GOTO_TIMEOUT_MS}ms: ${e instanceof Error ? e.message : String(e)}`)
     try { await page.close(); await context.close(); await browser.close() } catch {}
-    const d = getProxyDelta()
-    return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
+    return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
   }
 
-  if (page.isClosed()) { const d = getProxyDelta(); return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful } }
+  if (page.isClosed()) { return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful } }
 
   try {
     await page.evaluate(() => {
@@ -302,8 +293,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
           await new Promise(resolve => setTimeout(resolve, AFTER_SUCCESS_EXTRA_DELAY_MS))
           try { await page.waitForLoadState('networkidle', { timeout: NETWORKIDLE_AFTER_SUCCESS_TIMEOUT_MS }) } catch (e) { addDiag(`[TIMEOUT] Page networkidle after success: ${e instanceof Error ? e.message : String(e)}`) }
           try { await browser.close() } catch {}
-          const d = getProxyDelta()
-          return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
+          return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
         }
       } else {
         try { await opened.bringToFront() } catch {}
@@ -314,8 +304,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         try { await page.close() } catch {}
         try { await opened.waitForLoadState('domcontentloaded', { timeout: DOMCONTENTLOADED_TIMEOUT_SHORT_MS }).catch((e: any) => { addDiag(`[TIMEOUT] Popup domcontentloaded: ${e instanceof Error ? e.message : String(e)}`) }) } catch (e) { addDiag(`[ERROR] Popup domcontentloaded error: ${e instanceof Error ? e.message : String(e)}`) }
         try { await browser.close() } catch {}
-        const d = getProxyDelta()
-        return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
+        return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
       }
     } else {
       try { addDiag('[WAIT] final on same page'); wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? DEBUG_MAX_WAIT_MS : NORMAL_MAX_WAIT_MS); addDiag(`[WAIT DONE] success=${wasSuccessful}`) } catch (e) { addDiag(`[WAIT ERROR] ${e instanceof Error ? e.message : String(e)}`) }
@@ -324,8 +313,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         await new Promise(resolve => setTimeout(resolve, AFTER_SUCCESS_EXTRA_DELAY_MS))
         try { await page.waitForLoadState('networkidle', { timeout: NETWORKIDLE_AFTER_SUCCESS_TIMEOUT_SHORT_MS }) } catch (e) { addDiag(`[TIMEOUT] Page networkidle after success (short): ${e instanceof Error ? e.message : String(e)}`) }
         try { await browser.close() } catch {}
-        const d = getProxyDelta()
-        return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
+        return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
       }
     }
   } else {
@@ -345,9 +333,8 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   } catch (e) {}
 
   if (!wasSuccessful) {
-    const d = getProxyDelta()
     if (DEBUG_MODE) {
-      console.log(`[W${workerId}] DEBUG FAIL bytesUp=${formatBytes(d.bytesSent)} bytesDown=${formatBytes(d.bytesReceived)} events=${diagEvents.length}`)
+      console.log(`[W${workerId}] DEBUG FAIL bytesUp=${formatBytes(0)} bytesDown=${formatBytes(0)} events=${diagEvents.length}`)
       for (const e of diagEvents) console.log(e)
     }
     const findLast = (pred: (s: string) => boolean) => {
@@ -361,12 +348,11 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     const lastHTTP5xx = findLast(s => /\[RESP\]\s+5\d\d\b/.test(s))
     const reason = lastTimeout || lastRouteErr || lastReqFailed || lastHTTP5xx || lastHTTP4xx || 'unknown'
     const tail = diagEvents.slice(-5).join(' | ')
-    console.log(`[W${workerId}] FAIL bytesUp=${formatBytes(d.bytesSent)} bytesDown=${formatBytes(d.bytesReceived)} reason=${typeof reason === 'string' ? reason : 'unknown'}`)
+    console.log(`[W${workerId}] FAIL bytesUp=${formatBytes(0)} bytesDown=${formatBytes(0)} reason=${typeof reason === 'string' ? reason : 'unknown'}`)
     if (tail) console.log(`[W${workerId}] FAIL tail: ${tail}`)
   }
 
-  const d = getProxyDelta()
-  return { bytesSent: d.bytesSent, bytesReceived: d.bytesReceived, success: wasSuccessful }
+  return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
 }
 
 function waitForFinalOnPage(p: any, timeoutMs = WAIT_FOR_FINAL_ON_PAGE_DEFAULT_MS): Promise<boolean> {
