@@ -343,7 +343,6 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
           return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
         }
       } else {
-        console.log('[INFO] Suppusedly popup opened')
         try { await opened.bringToFront() } catch {}
         try { addDiag('[WAIT] final on popup'); wasSuccessful = await waitForFinalOnPage(opened, DEBUG_MODE ? DEBUG_MAX_WAIT_MS : NORMAL_MAX_WAIT_MS); addDiag(`[WAIT DONE] success=${wasSuccessful}`) } catch (e) { addDiag(`[WAIT ERROR] ${e instanceof Error ? e.message : String(e)}`) }
         if (wasSuccessful) {
@@ -355,7 +354,6 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
       }
     } else {
-      console.log('[INFO] Suppusedly waiting on the same apge')
       try { addDiag('[WAIT] final on same page'); wasSuccessful = await waitForFinalOnPage(page, DEBUG_MODE ? DEBUG_MAX_WAIT_MS : NORMAL_MAX_WAIT_MS); addDiag(`[WAIT DONE] success=${wasSuccessful}`) } catch (e) { addDiag(`[WAIT ERROR] ${e instanceof Error ? e.message : String(e)}`) }
       if (wasSuccessful) {
         isClosing = true
