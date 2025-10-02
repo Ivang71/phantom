@@ -2,7 +2,10 @@ const { ProxyAgent, setGlobalDispatcher, fetch: undiciFetch } = require('undici'
 import { PROXY_HOST, PROXY_PASS, PROXY_PORT, PROXY_USER } from '@/config'
 
 export const upstreamProxyAuth = (PROXY_USER && PROXY_PASS) ? `${encodeURIComponent(PROXY_USER)}:${encodeURIComponent(PROXY_PASS)}@` : ''
-export const upstreamAgent = new ProxyAgent(`http://${upstreamProxyAuth}${PROXY_HOST}:${PROXY_PORT}`)
+export const upstreamAgent = new ProxyAgent({
+  uri: `http://${upstreamProxyAuth}${PROXY_HOST}:${PROXY_PORT}`,
+  connect: { rejectUnauthorized: false }
+})
 
 export function routeNodeFetchViaProxy(): void {
   if (PROXY_HOST && PROXY_PORT) {
