@@ -1,7 +1,9 @@
-import { visitSite } from '@/browser/visit'
+import { visitIpCycle } from '@/browser/visit'
 import { formatBytes } from '@/utils'
 import { logError, logInfo } from '@/logger'
 import { PROXY_PORT_END, PROXY_PORT_START } from '@/config'
+import { LocalPassThroughProxy } from '@/network/localProxy'
+import { launchBrowserWithLocalPort } from '@/browser/create'
 import { StatsManager } from '@/stats'
 
 export interface WorkerStats {
@@ -31,12 +33,24 @@ export async function runWorker(workerId: number, iterationsToRun: number, stats
 
   logInfo(`[W${workerId}] Worker started - will run ${iterationsToRun} iterations`)
 
+  // Per-worker local proxy and single Chromium reused across cycles
+  const localPort = 0
+  const firstIter = globalIterationCount++
+  let currentProxyPort = PROXY_PORT_START + (firstIter % (PROXY_PORT_END - PROXY_PORT_START + 1))
+  const localProxy = new LocalPassThroughProxy(localPort, currentProxyPort)
+  const boundPort = await localProxy.start()
+  const browser = await launchBrowserWithLocalPort(boundPort)
+  ;(browser as any).__localProxy = localProxy
+
   for (let i = 0; i < iterationsToRun; i++) {
-    const iterationNumber = globalIterationCount++
-    const currentProxyPort = PROXY_PORT_START + (iterationNumber % (PROXY_PORT_END - PROXY_PORT_START + 1))
+    if (i > 0) {
+      const iterNum = globalIterationCount++
+      currentProxyPort = PROXY_PORT_START + (iterNum % (PROXY_PORT_END - PROXY_PORT_START + 1))
+      await localProxy.rotate(currentProxyPort)
+    }
     const startTime = Date.now()
     try {
-      const networkData = await visitSite(currentProxyPort, workerId)
+      const networkData = await visitIpCycle(browser as any, currentProxyPort, workerId)
       const duration = Date.now() - startTime
       stats.iterations++
       stats.bytesSent += networkData.bytesSent
@@ -48,7 +62,7 @@ export async function runWorker(workerId: number, iterationsToRun: number, stats
         statsManager.recordSuccessfulCycle(networkData.bytesSent, networkData.bytesReceived)
       }
       if (stats.iterations % 10 === 0 || networkData.success) {
-        logInfo(`[W${workerId}] Iteration ${stats.iterations} completed in ${duration}ms (Port: ${currentProxyPort}) ${networkData.success ? '[SUCCESS]' : '[NO SUCCESS]'}`)
+        logInfo(`[W${workerId}] Iteration ${stats.iterations} completed in ${duration}ms (ProxyPort: ${currentProxyPort}) ${networkData.success ? '[SUCCESS]' : '[NO SUCCESS]'}`)
         logInfo(`[W${workerId}] Network: Sent ${formatBytes(networkData.bytesSent)}, Received ${formatBytes(networkData.bytesReceived)}`)
       }
     } catch (error) {
@@ -60,6 +74,8 @@ export async function runWorker(workerId: number, iterationsToRun: number, stats
       await new Promise(resolve => setTimeout(resolve, 1000))
     }
   }
+  try { await (browser as any).close() } catch {}
+  try { await localProxy.stop() } catch {}
   logInfo(`[W${workerId}] Worker completed ${stats.iterations} iterations (${stats.errors} errors)`)
 }
 

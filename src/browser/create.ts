@@ -1,12 +1,7 @@
 import { chromium } from 'playwright-extra'
-import { PROXY_HOST, PROXY_PASS, PROXY_PORT, PROXY_USER } from '@/config'
 
-export async function createBrowserWithProxy(proxyPort: number) {
-  const proxyConfig: any = {
-    server: `http://${PROXY_HOST}:${proxyPort}`,
-    ...(PROXY_USER && PROXY_PASS && { username: PROXY_USER, password: PROXY_PASS })
-  }
 
+export async function launchBrowserWithLocalPort(localPort: number) {
   return await chromium.launch({
     headless: process.env.HEADLESS !== 'false',
     args: [
@@ -37,7 +32,7 @@ export async function createBrowserWithProxy(proxyPort: number) {
       '--disable-features=VizDisplayCompositor',
       '--ignore-certificate-errors'
     ],
-    proxy: proxyConfig
+    proxy: { server: `http://127.0.0.1:${localPort}` }
   })
 }
 

@@ -1,5 +1,4 @@
 import UserAgent = require('user-agents')
-import { createBrowserWithProxy } from '@/browser/create'
 import {
   AFTER_SUCCESS_EXTRA_DELAY_MS,
   DEBUG_MAX_WAIT_MS,
@@ -26,20 +25,7 @@ import { detectGeoViaProxy, localeFromCountry } from '@/network/geo'
 import { formatBytes } from '@/utils'
 import { LogLevel, logDebug, logError, logInfo, logWarn } from '@/logger'
 
-export async function visitSite(proxyPort: number, workerId: number): Promise<{ bytesSent: number, bytesReceived: number, success: boolean }> {
-  return Promise.race([
-    visitSiteInternal(proxyPort, workerId),
-    new Promise<{ bytesSent: number, bytesReceived: number, success: boolean }>((_, reject) =>
-      setTimeout(() => reject(new Error(`visitSite timeout after ${VISIT_SITE_OVERALL_TIMEOUT_MS} ms`)), VISIT_SITE_OVERALL_TIMEOUT_MS)
-    )
-  ]).catch(async (error) => {
-    logError(`[W${workerId}] [TIMEOUT] visitSite timed out or errored: ${error instanceof Error ? error.message : String(error)}`)
-    return { bytesSent: 0, bytesReceived: 0, success: false }
-  })
-}
-
-async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{ bytesSent: number, bytesReceived: number, success: boolean }> {
-  const browser = await createBrowserWithProxy(proxyPort)
+export async function visitIpCycle(browser: any, proxyPort: number, workerId: number): Promise<{ bytesSent: number, bytesReceived: number, success: boolean }> {
   let isClosing = false
   let wasSuccessful = false
   const diagEvents: string[] = []
@@ -95,7 +81,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   let externalHost: string | null = null
   let externalHit = false
 
-  await page.route('**/*', async (route) => {
+  await page.route('**/*', async (route: any) => {
     try {
       const url = route.request().url()
       const resourceType = route.request().resourceType()
@@ -173,12 +159,12 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     }
   })
 
-  page.on('requestfailed', (request) => {
+  page.on('requestfailed', (request: any) => {
     const failure = request.failure()
     logWarn(`[W${workerId}] [REQ FAILED] ${request.url()} - ${failure ? failure.errorText : 'unknown'}`)
     addDiag(`[REQ FAILED] ${request.method()} ${request.url()} ${failure ? failure.errorText : 'unknown'}`)
   })
-  page.on('response', (response) => {
+  page.on('response', (response: any) => {
     const status = response.status()
     if (status >= 400) {
       logWarn(`[W${workerId}] [HTTP ${status}] ${response.url()}`)
@@ -186,7 +172,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     addDiag(`[RESP] ${status} ${response.url()}`)
   })
 
-  page.on('request', (request) => {
+  page.on('request', (request: any) => {
     const url = request.url()
     addDiag(`[REQ] ${request.method()} ${url}`)
     if (url.includes('p.pcdelv.com/go/')) {
@@ -196,7 +182,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     logDebug(`[W${workerId}] [REQUEST] ${request.method()} ${url}`)
   })
 
-  page.on('response', async (response) => {
+  page.on('response', async (response: any) => {
     if (isClosing) return
     try {
       const url = response.url()
@@ -236,19 +222,19 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
 
   // External hop timeout guard
   const EXTERNAL_TIMEOUT = 7000
-  page.waitForRequest(req => {
+  page.waitForRequest((req: any) => {
     try {
       return !!externalHost && new URL(req.url()).hostname.toLowerCase() === externalHost
     } catch { return false }
   }, { timeout: EXTERNAL_TIMEOUT }).catch(() => logWarn(`[W${workerId}] external hop never happened`))
 
   // Abort all network after the single external request completes
-  page.on('requestfinished', (req) => {
+  page.on('requestfinished', (req: any) => {
     try {
       const host = new URL(req.url()).hostname.toLowerCase()
       if (externalHit && externalHost && host === externalHost) {
         addDiag('[SHUTDOWN] external hop done, aborting further requests')
-        page.route('**/*', r => r.abort())
+        page.route('**/*', (r: any) => r.abort())
       }
     } catch {}
   })
@@ -282,7 +268,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   } catch (e) {
     logWarn(`[W${workerId}] [TIMEOUT] Page load timeout after ${PAGE_GOTO_TIMEOUT_MS}ms: ${e instanceof Error ? e.message : String(e)}`)
     addDiag(`[TIMEOUT] Page goto after ${PAGE_GOTO_TIMEOUT_MS}ms: ${e instanceof Error ? e.message : String(e)}`)
-    try { await page.close(); await context.close(); await browser.close() } catch {}
+    try { await page.close(); await context.close() } catch {}
     return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
   }
 
@@ -324,7 +310,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   if (targetDiv) {
     try {
       if (!page.isClosed() && page.url() === TARGET_URL) {
-        await page.evaluate((element) => {
+        await page.evaluate((element: any) => {
           const div = element as HTMLElement
           div.style.display = 'block'
           div.style.visibility = 'visible'
@@ -350,7 +336,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       let found = false
       while (!found && Date.now() < detectUntil) {
         const nowPagesAll = browser.contexts().flatMap((c: any) => c.pages())
-        const diffAll = nowPagesAll.find(p => !allPagesBefore.includes(p))
+        const diffAll = nowPagesAll.find((p: any) => !allPagesBefore.includes(p))
         if (diffAll) { found = true; (openedViaEvent as any) = diffAll; break }
         await page.waitForTimeout(200)
       }
@@ -360,7 +346,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       }
     }
     const pagesAfterAll = browser.contexts().flatMap((c: any) => c.pages())
-    const opened = openedViaEvent || pagesAfterAll.find(p => !allPagesBefore.includes(p))
+    const opened = openedViaEvent || pagesAfterAll.find((p: any) => !allPagesBefore.includes(p))
     if (opened) {
       const openedUrl = opened.url()
       const openedHasOpener = !!opened.opener()
@@ -385,7 +371,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
           isClosing = true
           await new Promise(resolve => setTimeout(resolve, AFTER_SUCCESS_EXTRA_DELAY_MS))
           try { await page.waitForLoadState('networkidle', { timeout: NETWORKIDLE_AFTER_SUCCESS_TIMEOUT_MS }) } catch (e) { addDiag(`[TIMEOUT] Page networkidle after success: ${e instanceof Error ? e.message : String(e)}`) }
-          try { await browser.close() } catch {}
+          try { await context.close() } catch {}
           return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
         }
       } else {
@@ -396,7 +382,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         }
         try { await page.close() } catch {}
         try { await opened.waitForLoadState('domcontentloaded', { timeout: DOMCONTENTLOADED_TIMEOUT_SHORT_MS }).catch((e: any) => { addDiag(`[TIMEOUT] Popup domcontentloaded: ${e instanceof Error ? e.message : String(e)}`) }) } catch (e) { addDiag(`[ERROR] Popup domcontentloaded error: ${e instanceof Error ? e.message : String(e)}`) }
-        try { await browser.close() } catch {}
+        try { await context.close() } catch {}
         return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
       }
     } else {
@@ -405,7 +391,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
         isClosing = true
         await new Promise(resolve => setTimeout(resolve, AFTER_SUCCESS_EXTRA_DELAY_MS))
         try { await page.waitForLoadState('networkidle', { timeout: NETWORKIDLE_AFTER_SUCCESS_TIMEOUT_SHORT_MS }) } catch (e) { addDiag(`[TIMEOUT] Page networkidle after success (short): ${e instanceof Error ? e.message : String(e)}`) }
-        try { await browser.close() } catch {}
+        try { await context.close() } catch {}
         return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
       }
     }
@@ -414,15 +400,9 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   }
 
   try {
-    const contexts = browser.contexts()
-    for (const context of contexts) {
-      const pages = context.pages()
-      for (const page of pages) {
-        try { if (!page.isClosed()) { await page.close() } } catch {}
-      }
-      try { await context.close() } catch {}
-    }
-    await browser.close()
+    const pages = context.pages()
+    for (const pg of pages) { try { if (!pg.isClosed()) await pg.close() } catch {} }
+    await context.close()
   } catch (e) {}
 
   if (!wasSuccessful) {
@@ -448,7 +428,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
 }
 
-function waitForFinalOnPage(p: any, timeoutMs = WAIT_FOR_FINAL_ON_PAGE_DEFAULT_MS): Promise<boolean> {
+function waitForFinalOnPage(p: any, timeoutMs: number = WAIT_FOR_FINAL_ON_PAGE_DEFAULT_MS): Promise<boolean> {
   return new Promise((resolve) => {
     let done = false
     const isInternalHost = (host: string | undefined): boolean => {
@@ -489,11 +469,11 @@ function waitForFinalOnPage(p: any, timeoutMs = WAIT_FOR_FINAL_ON_PAGE_DEFAULT_M
     function cleanup(result: boolean) {
       if (done) return
       done = true
-      try { p.off('response', onResp) } catch (e) {}
+      try { (p as any).off('response', onResp) } catch (e) {}
       clearTimeout(timer)
       resolve(result)
     }
-    try { p.on('response', onResp) } catch (e) { cleanup(false) }
+    try { (p as any).on('response', onResp) } catch (e) { cleanup(false) }
   })
 }
 
