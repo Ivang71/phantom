@@ -344,7 +344,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
       ctxPageWait = context.waitForEvent('page', { timeout: detectMs }).catch(() => null)
     } catch {}
     try { await (targetDiv as any).click({ force: true }); addDiag('[CLICK] targetDiv clicked') } catch (e) { addDiag(`[CLICK ERROR] ${e instanceof Error ? e.message : String(e)}`) }
-    const openedViaEvent: any = (await popupWait) || (await ctxPageWait)
+    let openedViaEvent: any = (await popupWait) || (await ctxPageWait)
     if (!openedViaEvent) {
       const detectUntil = Date.now() + Math.max(POST_CLICK_SHORT_WAIT_MS + POPUP_DETECTION_GRACE_MS, 8000)
       let found = false
