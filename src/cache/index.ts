@@ -1,6 +1,7 @@
 import { TARGET_URL } from '@/config'
 import { logInfo, logWarn, logError, logDebug } from '@/logger'
 import { formatBytes } from '@/utils'
+import { fetch as proxyFetch } from '@/network/proxy'
 
 export const fileCache = new Map<string, { content: Buffer, contentType: string }>()
 export const CACHED_FILES = [
@@ -16,7 +17,7 @@ export async function preloadCache(): Promise<void> {
   for (const url of CACHED_FILES) {
     try {
       logInfo(`Downloading ${url}...`)
-      const response = await fetch(url)
+      const response = await proxyFetch(url)
       if (!response.ok) {
         logWarn(`Failed to download ${url}: ${response.status} ${response.statusText}`)
         continue

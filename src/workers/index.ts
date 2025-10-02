@@ -1,4 +1,4 @@
-import { visitSite } from '@/browser/visit'
+import { visitIpCycle } from '@/browser/visit'
 import { formatBytes } from '@/utils'
 import { logError, logInfo } from '@/logger'
 import { PROXY_PORT_END, PROXY_PORT_START } from '@/config'
@@ -36,7 +36,7 @@ export async function runWorker(workerId: number, iterationsToRun: number, stats
     const currentProxyPort = PROXY_PORT_START + (iterationNumber % (PROXY_PORT_END - PROXY_PORT_START + 1))
     const startTime = Date.now()
     try {
-      const networkData = await visitSite(currentProxyPort, workerId)
+      const networkData = await visitIpCycle(currentProxyPort, workerId)
       const duration = Date.now() - startTime
       stats.iterations++
       stats.bytesSent += networkData.bytesSent

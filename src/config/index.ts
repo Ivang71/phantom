@@ -12,6 +12,8 @@ export const MAX_CONCURRENT_WORKERS = Number(process.env.NUMBER_OF_WORKERS)
 
 export const TARGET_URL = process.env.TARGET_URL as string
 export const DEBUG_MODE = process.env.DEBUG_MODE === 'true'
+export const BANDWIDTH_ANALYSIS = process.env.BANDWIDTH_ANALYSIS === 'true'
+export const CACHE_ENABLED = process.env.CACHE_ENABLED !== 'false'
 export const DEBUG_MAX_WAIT_MS = Number(process.env.DEBUG_MAX_WAIT_MS || 20000)
 export const NORMAL_MAX_WAIT_MS = Number(process.env.NORMAL_MAX_WAIT_MS || 15000)
 
@@ -23,6 +25,7 @@ export const PROXY_PORT_START = 10000
 export const PROXY_PORT_END = 20000
 export const MAX_ITERATIONS = 1000000000
 export const WORKER_BATCH_SIZE = 500000000
+export const ITERATIONS_PER_IP = Number(process.env.ITERATIONS_PER_IP || 20)
 
 // Derived values
 export const TARGET_HOST = new URL(TARGET_URL).hostname

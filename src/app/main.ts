@@ -1,4 +1,4 @@
-import { LOG_MODE, MAX_CONCURRENT_WORKERS, MAX_ITERATIONS, WORKER_BATCH_SIZE } from '@/config'
+import { LOG_MODE, MAX_CONCURRENT_WORKERS, MAX_ITERATIONS, WORKER_BATCH_SIZE, CACHE_ENABLED } from '@/config'
 import { preloadCache, CACHED_FILES, globalCacheBytesSaved, globalCacheHits } from '@/cache'
 import { getMemoryUsage, getSystemInfo, formatBytes } from '@/utils'
 import { logInfo } from '@/logger'
@@ -46,7 +46,11 @@ export async function main(): Promise<void> {
   logInfo('============================\n')
 
   routeNodeFetchViaProxy()
-  await preloadCache()
+  if (CACHE_ENABLED) {
+    await preloadCache()
+  } else {
+    logInfo('Cache disabled by CACHE_ENABLED=false')
+  }
   statsManager.printStats()
   const statsInterval = setInterval(() => { printStats(statsManager) }, 15000)
 
