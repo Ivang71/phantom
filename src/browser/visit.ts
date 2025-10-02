@@ -98,6 +98,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
   await page.route('**/*', async (route) => {
     try {
       const url = route.request().url()
+      const resourceType = route.request().resourceType()
       addDiag(`[ROUTE] ${url}`)
       // Serve from cache if available
       if (CACHED_FILES.includes(url)) {
@@ -112,6 +113,36 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
             body: cached.content
           })
           return
+        }
+      }
+
+      // Hard block heavy or unnecessary resource types before network
+      // Block globally: images, stylesheets, fonts, media, websockets, SSE, manifest
+      if (
+        resourceType === 'image' ||
+        resourceType === 'stylesheet' ||
+        resourceType === 'font' ||
+        resourceType === 'media' ||
+        resourceType === 'websocket' ||
+        resourceType === 'eventsource' ||
+        resourceType === 'manifest'
+      ) {
+        addDiag(`[ABORT TYPE] ${resourceType} ${url}`)
+        return await route.abort()
+      }
+
+      // Allow exactly one script: PopCash show.js (should be served from cache). Block all other scripts.
+      if (resourceType === 'script') {
+        try {
+          const u = new URL(url)
+          const isShowJs = u.hostname.endsWith('popcash.net')
+          if (!isShowJs) {
+            addDiag(`[ABORT SCRIPT] ${url}`)
+            return await route.abort()
+          }
+        } catch {
+          addDiag(`[ABORT SCRIPT] malformed ${url}`)
+          return await route.abort()
         }
       }
 
