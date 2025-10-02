@@ -222,24 +222,7 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
     } catch {}
   })
 
-  context.on('page', async (newPage) => {
-    logDebug(`[W${workerId}] [NEW PAGE] Opened: ${newPage.url()}`)
-    addDiag(`[NEW PAGE] ${newPage.url()}`)
-    try {
-      await newPage.waitForLoadState('networkidle', { timeout: NEW_PAGE_NETWORKIDLE_TIMEOUT_MS })
-      addDiag(`[NEW PAGE NETWORK IDLE] ${newPage.url()}`)
-      wasSuccessful = true
-      isClosing = true
-      try { await newPage.close() } catch {}
-      try { await page.close() } catch {}
-      try { await context.close() } catch {}
-      try { await browser.close() } catch {}
-      return { bytesSent: 0, bytesReceived: 0, success: wasSuccessful }
-    } catch (e) {
-      addDiag(`[TIMEOUT] New page networkidle after ${NEW_PAGE_NETWORKIDLE_TIMEOUT_MS}ms: ${e instanceof Error ? e.message : String(e)}`)
-      try { await newPage.close({ runBeforeUnload: false }) } catch {}
-    }
-  })
+
 
   await page.addInitScript(() => {
     delete (window as any).navigator.webdriver
@@ -321,15 +304,47 @@ async function visitSiteInternal(proxyPort: number, workerId: number): Promise<{
 
     await page.waitForTimeout(PRE_CLICK_PREPARE_MS)
     const pagesBefore = context.pages()
+    const allPagesBefore = browser.contexts().flatMap((c: any) => c.pages())
+    let popupWait: any = null
+    let ctxPageWait: any = null
+    try {
+      const detectMs = Math.max(POST_CLICK_SHORT_WAIT_MS + POPUP_DETECTION_GRACE_MS, 8000)
+      popupWait = page.waitForEvent('popup', { timeout: detectMs }).catch(() => null)
+      ctxPageWait = context.waitForEvent('page', { timeout: detectMs }).catch(() => null)
+    } catch {}
     try { await (targetDiv as any).click({ force: true }); addDiag('[CLICK] targetDiv clicked') } catch (e) { addDiag(`[CLICK ERROR] ${e instanceof Error ? e.message : String(e)}`) }
-    await page.waitForTimeout(POST_CLICK_SHORT_WAIT_MS)
-    await page.waitForTimeout(POPUP_DETECTION_GRACE_MS)
-    const pagesAfter = context.pages()
-    const opened = pagesAfter.find(p => !pagesBefore.includes(p))
+    const openedViaEvent: any = (await popupWait) || (await ctxPageWait)
+    if (!openedViaEvent) {
+      const detectUntil = Date.now() + Math.max(POST_CLICK_SHORT_WAIT_MS + POPUP_DETECTION_GRACE_MS, 8000)
+      let found = false
+      while (!found && Date.now() < detectUntil) {
+        const nowPagesAll = browser.contexts().flatMap((c: any) => c.pages())
+        const diffAll = nowPagesAll.find(p => !allPagesBefore.includes(p))
+        if (diffAll) { found = true; (openedViaEvent as any) = diffAll; break }
+        await page.waitForTimeout(200)
+      }
+      if (!openedViaEvent) {
+        await page.waitForTimeout(POST_CLICK_SHORT_WAIT_MS)
+        await page.waitForTimeout(POPUP_DETECTION_GRACE_MS)
+      }
+    }
+    const pagesAfterAll = browser.contexts().flatMap((c: any) => c.pages())
+    const opened = openedViaEvent || pagesAfterAll.find(p => !allPagesBefore.includes(p))
     if (opened) {
       const openedUrl = opened.url()
+      const openedHasOpener = !!opened.opener()
       const openedIsSameTarget = openedUrl === TARGET_URL || openedUrl === 'about:blank'
-      addDiag(`[POPUP] opened ${openedUrl || 'about:blank'} sameTarget=${openedIsSameTarget}`)
+      let kind: 'tab' | 'window' | 'unknown' = 'unknown'
+      try {
+        const openerId = await getWindowId(page)
+        const openedId = await getWindowId(opened)
+        if (openerId !== null && openedId !== null) {
+          kind = openerId === openedId ? 'tab' : 'window'
+        }
+      } catch {}
+      const tag = kind === 'window' ? '[NEW WINDOW]' : kind === 'tab' ? '[NEW TAB]' : '[NEW PAGE]'
+      addDiag(`${tag} ${openedUrl || 'about:blank'} opener=${openedHasOpener} sameTarget=${openedIsSameTarget}`)
+      logInfo(`[W${workerId}] ${tag} url=${openedUrl || 'about:blank'} opener=${openedHasOpener} sameTarget=${openedIsSameTarget}`)
       if (openedIsSameTarget) {
         try { await opened.bringToFront() } catch {}
         try { await opened.close() } catch {}
@@ -449,6 +464,16 @@ function waitForFinalOnPage(p: any, timeoutMs = WAIT_FOR_FINAL_ON_PAGE_DEFAULT_M
     }
     try { p.on('response', onResp) } catch (e) { cleanup(false) }
   })
+}
+
+async function getWindowId(p: any): Promise<number | null> {
+  try {
+    const session = await p.context().newCDPSession(p)
+    const res = await session.send('Browser.getWindowForTarget')
+    return typeof res?.windowId === 'number' ? res.windowId : null
+  } catch {
+    return null
+  }
 }
 
 
