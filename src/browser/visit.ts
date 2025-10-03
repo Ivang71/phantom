@@ -78,6 +78,8 @@ export async function visitIpCycle(browser: any, proxyPort: number, workerId: nu
     '.popcash.net',
     new URL(TARGET_URL).hostname
   ]
+  const localProxy: any = (browser as any).__localProxy
+  try { localProxy?.setAllowlist(INTERNAL_HOSTS) } catch {}
   let externalHost: string | null = null
   let externalHit = false
 
@@ -206,6 +208,7 @@ export async function visitIpCycle(browser: any, proxyPort: number, workerId: nu
               externalHost = discoveredHost
               logInfo(`[W${workerId}] [ALLOW ONCE] external host set to ${externalHost}`)
               addDiag(`[ALLOW ONCE] external host ${externalHost}`)
+              try { localProxy?.setAllowlist([...INTERNAL_HOSTS, externalHost]) } catch {}
             } catch {}
           }
         } catch (e) {}
@@ -235,6 +238,7 @@ export async function visitIpCycle(browser: any, proxyPort: number, workerId: nu
       if (externalHit && externalHost && host === externalHost) {
         addDiag('[SHUTDOWN] external hop done, aborting further requests')
         page.route('**/*', (r: any) => r.abort())
+        try { localProxy?.setAllowlist(INTERNAL_HOSTS) } catch {}
       }
     } catch {}
   })

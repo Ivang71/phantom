@@ -1,11 +1,13 @@
 import { ProxyAgent } from '@/network/proxy'
 import { fetch } from 'undici'
-import { PROXY_HOST, PROXY_PASS, PROXY_PORT, PROXY_USER } from '@/config'
+import { PROXY_HOST, PROXY_PASS, PROXY_USER } from '@/config'
+import { getUpstreamProxyPort } from '@/network/rotator'
 
-export async function detectGeoViaProxy(proxyPort: number): Promise<{ countryCode: string, timezone: string, lat: number, lon: number }> {
+export async function detectGeoViaProxy(proxyPort?: number): Promise<{ countryCode: string, timezone: string, lat: number, lon: number }> {
   const url = 'http://ip-api.com/json?fields=status,countryCode,timezone,lat,lon'
   const upstreamProxyAuth = (PROXY_USER && PROXY_PASS) ? `${encodeURIComponent(PROXY_USER)}:${encodeURIComponent(PROXY_PASS)}@` : ''
-  const dispatcher = new ProxyAgent(`http://${upstreamProxyAuth}${PROXY_HOST}:${proxyPort}`)
+  const port = typeof proxyPort === 'number' ? proxyPort : getUpstreamProxyPort()
+  const dispatcher = new ProxyAgent(`http://${upstreamProxyAuth}${PROXY_HOST}:${port}`)
   const response = await fetch(url, { dispatcher })
   if (!response.ok) {
     throw new Error(`Geo lookup HTTP ${response.status}`)

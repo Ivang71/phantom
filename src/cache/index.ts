@@ -1,6 +1,9 @@
-import { TARGET_URL } from '@/config'
+import { TARGET_URL, PROXY_HOST, PROXY_PASS, PROXY_USER } from '@/config'
 import { logInfo, logWarn, logError, logDebug } from '@/logger'
 import { formatBytes } from '@/utils'
+import { ProxyAgent } from '@/network/proxy'
+import { getUpstreamProxyPort } from '@/network/rotator'
+import { fetch } from '@/network/proxy'
 
 export const fileCache = new Map<string, { content: Buffer, contentType: string }>()
 export const CACHED_FILES = [
@@ -16,7 +19,9 @@ export async function preloadCache(): Promise<void> {
   for (const url of CACHED_FILES) {
     try {
       logInfo(`Downloading ${url}...`)
-      const response = await fetch(url)
+      const upstreamProxyAuth = (PROXY_USER && PROXY_PASS) ? `${encodeURIComponent(PROXY_USER)}:${encodeURIComponent(PROXY_PASS)}@` : ''
+      const dispatcher = new ProxyAgent(`http://${upstreamProxyAuth}${PROXY_HOST}:${getUpstreamProxyPort()}`)
+      const response = await fetch(url, { dispatcher })
       if (!response.ok) {
         logWarn(`Failed to download ${url}: ${response.status} ${response.statusText}`)
         continue

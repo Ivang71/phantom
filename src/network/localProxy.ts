@@ -1,18 +1,17 @@
 import * as net from 'net'
 import * as http from 'http'
 import { PROXY_HOST, PROXY_USER, PROXY_PASS } from '@/config'
+import { getUpstreamProxyPort } from '@/network/rotator'
 
 export class LocalPassThroughProxy {
   private server: http.Server
   private port: number
-  private upstreamPort: number
   private sockets = new Set<net.Socket>()
   private tunnels = new Set<net.Socket>()
   private allowlist: string[] | null = null
 
-  constructor(port: number, upstreamPort: number) {
+  constructor(port: number) {
     this.port = port
-    this.upstreamPort = upstreamPort
     this.server = http.createServer()
     this.server.on('request', this.handleHttp)
     this.server.on('connect', this.handleConnect)
@@ -23,8 +22,7 @@ export class LocalPassThroughProxy {
     return (this.server.address() as any).port
   }
 
-  public async rotate(upstreamPort: number): Promise<void> {
-    this.upstreamPort = upstreamPort
+  public async rotate(): Promise<void> {
     for (const s of Array.from(this.sockets)) { try { s.destroy() } catch {} }
     for (const t of Array.from(this.tunnels)) { try { t.destroy() } catch {} }
     this.sockets.clear()
@@ -68,7 +66,7 @@ export class LocalPassThroughProxy {
     const authHeader = (PROXY_USER && PROXY_PASS) ? 'Basic ' + Buffer.from(`${PROXY_USER}:${PROXY_PASS}`).toString('base64') : undefined
     const options: http.RequestOptions = {
       host: PROXY_HOST,
-      port: this.upstreamPort,
+      port: getUpstreamProxyPort(),
       method: req.method,
       path: req.url,
       headers: {
@@ -92,7 +90,7 @@ export class LocalPassThroughProxy {
       try { clientSocket.destroy() } catch {}
       return
     }
-    const upstreamSocket = net.connect(this.upstreamPort, PROXY_HOST, () => {
+    const upstreamSocket = net.connect(getUpstreamProxyPort(), PROXY_HOST, () => {
       const auth = (PROXY_USER && PROXY_PASS) ? `Proxy-Authorization: Basic ${Buffer.from(`${PROXY_USER}:${PROXY_PASS}`).toString('base64')}` : ''
       const connectReq = `CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n${auth ? auth + '\r\n' : ''}\r\n`
       upstreamSocket.write(connectReq)
