@@ -64,6 +64,7 @@ DWELL_PRE_MS = int(os.environ.get('DWELL_PRE_MS', '0'))
 DWELL_POST_MS = int(os.environ.get('DWELL_POST_MS', '0'))
 NUMBER_OF_WORKERS = int(os.environ.get('NUMBER_OF_WORKERS'))
 MAX_THREADS = int(os.environ.get('MAX_THREADS', str(max(32, (os.cpu_count() or 4) * 8))))
+STAGGER_START_MS = int(os.environ.get('STAGGER_START_MS', '15000'))
 
 async def run_port(port: int):
     proxy = None
@@ -283,6 +284,9 @@ async def main():
             return p
 
     async def worker(worker_id: int):
+        if STAGGER_START_MS > 0:
+            delay_s = (STAGGER_START_MS / max(1, NUMBER_OF_WORKERS)) * worker_id / 1000.0
+            await asyncio.sleep(delay_s)
         while True:
             port = await get_next_port()
             print(f"\n=== PORT {port} ===")
