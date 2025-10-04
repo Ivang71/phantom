@@ -40,6 +40,7 @@ except Exception:
         pass
 import urllib.parse as u
 from urllib.parse import urlparse
+import concurrent.futures as _futures
 
 from net.client import TlsBrowser
 from browser.headers import chrome_nav_headers, chrome_script_headers, chrome_xhr_headers
@@ -62,6 +63,7 @@ LOG_COOKIES = env_flag('LOG_COOKIES', False)
 DWELL_PRE_MS = int(os.environ.get('DWELL_PRE_MS', '0'))
 DWELL_POST_MS = int(os.environ.get('DWELL_POST_MS', '0'))
 NUMBER_OF_WORKERS = int(os.environ.get('NUMBER_OF_WORKERS'))
+MAX_THREADS = int(os.environ.get('MAX_THREADS', str(max(32, (os.cpu_count() or 4) * 8))))
 
 async def run_port(port: int):
     proxy = None
@@ -262,6 +264,12 @@ async def run_port(port: int):
     print("Final URL   :", r['url'])
 
 async def main():
+    # Ensure enough threads for asyncio.to_thread (geo lookups, tls-client calls)
+    loop = asyncio.get_running_loop()
+    try:
+        loop.set_default_executor(_futures.ThreadPoolExecutor(max_workers=MAX_THREADS))
+    except Exception:
+        pass
     PORT_START = 10000
     PORT_END = 20000
     next_port = PORT_START
