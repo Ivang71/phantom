@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, time, random, asyncio
+import os, time, random, asyncio, contextlib
 try:
     from dotenv import load_dotenv, find_dotenv  # type: ignore
     from pathlib import Path
@@ -42,7 +42,7 @@ import urllib.parse as u
 from urllib.parse import urlparse
 
 from net.client import TlsBrowser
-from browser.headers import chrome_nav_headers, chrome_script_headers, chrome_xhr_headers, set_accept_language
+from browser.headers import chrome_nav_headers, chrome_script_headers, chrome_xhr_headers
 from browser.ua import generate_user_agent
 from route.popcash import build_go, next_url_from, extract_probe
 from net.geo import detect_geo_via_proxy, locale_from_country, accept_language_header_from_locale
@@ -57,10 +57,11 @@ def env_flag(name: str, default: bool = False) -> bool:
         return default
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
-LOG_HEADERS = env_flag('LOG_HEADERS', '0')
-LOG_COOKIES = env_flag('LOG_COOKIES', '0')
+LOG_HEADERS = env_flag('LOG_HEADERS', False)
+LOG_COOKIES = env_flag('LOG_COOKIES', False)
 DWELL_PRE_MS = int(os.environ.get('DWELL_PRE_MS', '0'))
 DWELL_POST_MS = int(os.environ.get('DWELL_POST_MS', '0'))
+NUMBER_OF_WORKERS = int(os.environ.get('NUMBER_OF_WORKERS'))
 
 async def run_port(port: int):
     proxy = None
@@ -73,20 +74,28 @@ async def run_port(port: int):
         proxy = f"http://{pu}:{pp}@{ph}:{port}"
     ua, ua_meta = generate_user_agent(port)
 
-    # Detect GEO via current proxy and set Accept-Language accordingly
-    try:
-        g = detect_geo_via_proxy(os.environ.get("PROXY_HOST"), os.environ.get("PROXY_USER"), os.environ.get("PROXY_PASS"), port)
-        if g and g.get('countryCode'):
-            locale = locale_from_country(g['countryCode'])
-            set_accept_language(accept_language_header_from_locale(locale))
-    except Exception:
-        pass
+    async def detect_accept_language_for_port() -> str | None:
+        try:
+            g = await asyncio.to_thread(
+                detect_geo_via_proxy,
+                os.environ.get("PROXY_HOST"),
+                os.environ.get("PROXY_USER"),
+                os.environ.get("PROXY_PASS"),
+                port,
+            )
+            if g and g.get('countryCode'):
+                locale = locale_from_country(g['countryCode'])
+                return accept_language_header_from_locale(locale)
+        except Exception:
+            return None
+        return None
     # Chrome-like TLS + redirect following via tls-client only
     b = TlsBrowser(ua, proxy)
 
     # optional: load tag script with target referer
     try:
-        sh = chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'])
+        al = await detect_accept_language_for_port()
+        sh = chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
         # print(f"=> GET https://cdn.popcash.net/show.js")
         # _ = await b.get("https://cdn.popcash.net/show.js", sh, timeout=8)
     except Exception:
@@ -96,7 +105,8 @@ async def run_port(port: int):
     try:
         tgt = urlparse(TARGET)
         origin = f"{tgt.scheme}://{tgt.netloc}"
-        xh = chrome_xhr_headers(TARGET, origin, 'cross-site', ua_meta['major'], ua_meta['platform'], ua_meta['mobile'])
+        al = await detect_accept_language_for_port()
+        xh = chrome_xhr_headers(TARGET, origin, 'cross-site', ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
         print(f"=> GET https://dcba.popcash.net/znWaa3gu")
         _ = await b.get("https://dcba.popcash.net/znWaa3gu", xh, timeout=5)
     except Exception:
@@ -122,7 +132,9 @@ async def run_port(port: int):
             site_ctx = 'same-origin' if cur_host == ref_host else 'cross-site'
         except Exception:
             site_ctx = 'cross-site'
-        h = chrome_nav_headers(referer, site_ctx, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'])
+        # Always re-detect geo per request for per-proxy alignment
+        al = await detect_accept_language_for_port()
+        h = chrome_nav_headers(referer, site_ctx, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
         print(f"=> GET {url}")
         r = await b.get(url, h, timeout=10)
         loc = r['headers'].get('location') or r['headers'].get('Location')
@@ -149,7 +161,8 @@ async def run_port(port: int):
         probe = extract_probe(r['text'])
         if probe:
             print(f"=> GET {probe}")
-            _ = await b.get(probe, chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile']), timeout=5)
+            al_probe = await detect_accept_language_for_port()
+            _ = await b.get(probe, chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al_probe), timeout=5)
 
         # Check if current URL contains /cl
         if '/cl' in r['url']:
@@ -164,7 +177,8 @@ async def run_port(port: int):
                         site_ctx = 'same-origin' if cur_host == ref_host else 'cross-site'
                     except Exception:
                         site_ctx = 'cross-site'
-                    h = chrome_nav_headers(r['url'], site_ctx, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'])
+                    al_cl = await detect_accept_language_for_port()
+                    h = chrome_nav_headers(r['url'], site_ctx, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al_cl)
                     print(f"Following /cl once to: {nxt_from_cl}")
                     # EXACTLY one hop after /cl: do not auto-follow more.
                     r = await b.get(nxt_from_cl, h, timeout=10)
@@ -195,7 +209,8 @@ async def run_port(port: int):
                                 pixel_urls.add(m)
                         for pu_url in list(pixel_urls)[:5]:
                             print(f"=> GET {pu_url}")
-                            _ = await b.get(pu_url, chrome_script_headers(r['url'], ua_meta['major'], ua_meta['platform'], ua_meta['mobile']), timeout=5)
+                            al_px = await detect_accept_language_for_port()
+                            _ = await b.get(pu_url, chrome_script_headers(r['url'], ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al_px), timeout=5)
                     except Exception:
                         pass
                     break
@@ -247,13 +262,31 @@ async def run_port(port: int):
     print("Final URL   :", r['url'])
 
 async def main():
-    for port in range(10000, 20001):
-        print(f"\n=== PORT {port} ===")
-        try:
-            await run_port(port)
-        except Exception as e:
-            print(f"[PORT {port}] error: {e}")
-        await asyncio.sleep(0.05)
+    PORT_START = 10000
+    PORT_END = 20000
+    next_port = PORT_START
+    lock = asyncio.Lock()
+
+    async def get_next_port() -> int:
+        nonlocal next_port
+        async with lock:
+            p = next_port
+            next_port = PORT_START if p >= PORT_END else p + 1
+            return p
+
+    async def worker(worker_id: int):
+        while True:
+            port = await get_next_port()
+            print(f"\n=== PORT {port} ===")
+            try:
+                await run_port(port)
+            except Exception as e:
+                print(f"[PORT {port}] error: {e}")
+            await asyncio.sleep(0.05)
+
+    workers = [asyncio.create_task(worker(i)) for i in range(max(1, NUMBER_OF_WORKERS))]
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.gather(*workers)
 
 if __name__ == '__main__':
     asyncio.run(main())

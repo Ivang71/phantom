@@ -1,10 +1,9 @@
 import os
 
-ACCEPT_LANGUAGE = os.environ.get('ACCEPT_LANGUAGE', 'en-US,en;q=0.9')
-
-def set_accept_language(value: str) -> None:
-    global ACCEPT_LANGUAGE
-    ACCEPT_LANGUAGE = value or 'en-US,en;q=0.9'
+def _effective_accept_language(override: str | None) -> str:
+    if override and override.strip():
+        return override
+    return os.environ.get('ACCEPT_LANGUAGE', 'en-US,en;q=0.9')
 
 
 def _sec_ch_headers(major: int, platform: str, mobile: str) -> dict:
@@ -20,10 +19,10 @@ def _sec_ch_headers(major: int, platform: str, mobile: str) -> dict:
     }
 
 
-def chrome_nav_headers(referer: str, site: str, major: int = 140, platform: str = 'Windows', mobile: str = '?0') -> dict:
+def chrome_nav_headers(referer: str, site: str, major: int = 140, platform: str = 'Windows', mobile: str = '?0', accept_language: str | None = None) -> dict:
     base = {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Language': ACCEPT_LANGUAGE,
+        'Accept-Language': _effective_accept_language(accept_language),
         'Accept-Encoding': 'gzip, deflate, br, zstd',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
@@ -39,10 +38,10 @@ def chrome_nav_headers(referer: str, site: str, major: int = 140, platform: str 
     return base
 
 
-def chrome_script_headers(referer: str, major: int = 140, platform: str = 'Windows', mobile: str = '?0') -> dict:
+def chrome_script_headers(referer: str, major: int = 140, platform: str = 'Windows', mobile: str = '?0', accept_language: str | None = None) -> dict:
     base = {
         'Accept': '*/*',
-        'Accept-Language': ACCEPT_LANGUAGE,
+        'Accept-Language': _effective_accept_language(accept_language),
         'Accept-Encoding': 'gzip, deflate, br, zstd',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
@@ -56,10 +55,10 @@ def chrome_script_headers(referer: str, major: int = 140, platform: str = 'Windo
     return base
 
 
-def chrome_xhr_headers(referer: str, origin: str, site: str, major: int = 140, platform: str = 'Windows', mobile: str = '?0') -> dict:
+def chrome_xhr_headers(referer: str, origin: str, site: str, major: int = 140, platform: str = 'Windows', mobile: str = '?0', accept_language: str | None = None) -> dict:
     base = {
         'Accept': '*/*',
-        'Accept-Language': ACCEPT_LANGUAGE,
+        'Accept-Language': _effective_accept_language(accept_language),
         'Accept-Encoding': 'gzip, deflate, br, zstd',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
