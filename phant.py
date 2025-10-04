@@ -63,7 +63,9 @@ LOG_COOKIES = env_flag('LOG_COOKIES', False)
 DWELL_PRE_MS = int(os.environ.get('DWELL_PRE_MS', '0'))
 DWELL_POST_MS = int(os.environ.get('DWELL_POST_MS', '0'))
 NUMBER_OF_WORKERS = int(os.environ.get('NUMBER_OF_WORKERS'))
-MAX_THREADS = int(os.environ.get('MAX_THREADS', str(max(32, (os.cpu_count() or 4) * 8))))
+_cores = (os.cpu_count() or 4)
+_auto_threads = min(4096, max(_cores * 8, NUMBER_OF_WORKERS * 8))
+MAX_THREADS = int(os.environ.get('MAX_THREADS') or _auto_threads)
 STAGGER_START_MS = int(os.environ.get('STAGGER_START_MS', '15000'))
 
 async def run_port(port: int):
