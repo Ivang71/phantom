@@ -4,9 +4,10 @@ import urllib.parse as u
 from urllib.parse import urlparse
 
 from net.client import TlsBrowser
-from browser.headers import chrome_nav_headers, chrome_script_headers, chrome_xhr_headers
+from browser.headers import chrome_nav_headers, chrome_script_headers, chrome_xhr_headers, set_accept_language
 from browser.ua import generate_user_agent
 from route.popcash import build_go, next_url_from, extract_probe
+from net.geo import detect_geo_via_proxy, locale_from_country, accept_language_header_from_locale
 
 TARGET = os.environ.get("TARGET_URL", "https://industrial-gaming.sbs/")
 UID = os.environ.get("POP_UID", "495426")
@@ -22,13 +23,25 @@ async def run_port(port: int):
     if pu and pp and ph and port:
         proxy = f"http://{pu}:{pp}@{ph}:{port}"
     ua, ua_meta = generate_user_agent(port)
+
+    # Detect GEO via current proxy and set Accept-Language accordingly
+    try:
+        g = detect_geo_via_proxy(os.environ.get("PROXY_HOST"), os.environ.get("PROXY_USER"), os.environ.get("PROXY_PASS"), port)
+        if g and g.get('countryCode'):
+            locale = locale_from_country(g['countryCode'])
+            set_accept_language(accept_language_header_from_locale(locale))
+    except Exception:
+        pass
     # Chrome-like TLS + redirect following via tls-client only
     b = TlsBrowser(ua, proxy)
 
-    # optional: script load (behavioural signal)
-    sh = chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'])
-    print(f"=> GET https://cdn.popcash.net/show.js")
-    _ = await b.get("https://cdn.popcash.net/show.js", sh, timeout=8)
+    # optional: load tag script with target referer
+    try:
+        sh = chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'])
+        # print(f"=> GET https://cdn.popcash.net/show.js")
+        # _ = await b.get("https://cdn.popcash.net/show.js", sh, timeout=8)
+    except Exception:
+        pass
 
     # optional: pre-flight probe as XHR like the tag
     try:
@@ -90,6 +103,19 @@ async def run_port(port: int):
                     ctype = r['headers'].get('content-type') or r['headers'].get('Content-Type')
                     print(f"<= {r['status']} {r['url']} len={len(r['content'])} ct={ctype or '-'}{f' loc={loc_final[:50]}' if loc_final else ''}")
                     chain.append(r['status'])
+                    # Try to fire impression/view pixels referenced in final HTML
+                    try:
+                        import re
+                        txt = r.get('text') or ''
+                        pixel_urls = set()
+                        for m in re.findall(r"https?://[^'\"\s>]+", txt):
+                            if ('popcash' in m or 'pcdelv' in m) and any(x in m for x in ('imp', 'impression', 'pixel', 'view', 'track')):
+                                pixel_urls.add(m)
+                        for pu_url in list(pixel_urls)[:5]:
+                            print(f"=> GET {pu_url}")
+                            _ = await b.get(pu_url, chrome_script_headers(r['url'], ua_meta['major'], ua_meta['platform'], ua_meta['mobile']), timeout=5)
+                    except Exception:
+                        pass
                     break
                 else:
                     print("[CL] No next URL resolvable from Location/Refresh/body; stopping (no hop performed)")

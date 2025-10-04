@@ -9,7 +9,7 @@ class TlsBrowser:
             import tls_client  # type: ignore
         except Exception as e:
             raise RuntimeError("tls-client python bindings are required. Install with: pip install tls-client") from e
-        profile = os.environ.get("TLS_CLIENT_PROFILE", "chrome_120")
+        profile = os.environ.get("TLS_CLIENT_PROFILE", "chrome_140")
         self._tls_mod = tls_client  # type: ignore
         self.session = tls_client.Session(
             client_identifier=profile,

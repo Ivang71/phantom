@@ -1,3 +1,12 @@
+import os
+
+ACCEPT_LANGUAGE = os.environ.get('ACCEPT_LANGUAGE', 'en-US,en;q=0.9')
+
+def set_accept_language(value: str) -> None:
+    global ACCEPT_LANGUAGE
+    ACCEPT_LANGUAGE = value or 'en-US,en;q=0.9'
+
+
 def _sec_ch_headers(major: int, platform: str, mobile: str) -> dict:
     return {
         'sec-ch-ua': f'"Chromium";v="{major}", "Not=A?Brand";v="24", "Google Chrome";v="{major}"',
@@ -9,7 +18,7 @@ def _sec_ch_headers(major: int, platform: str, mobile: str) -> dict:
 def chrome_nav_headers(referer: str, site: str, major: int = 140, platform: str = 'Windows', mobile: str = '?0') -> dict:
     base = {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Language': ACCEPT_LANGUAGE,
         'Accept-Encoding': 'gzip, deflate, br, zstd',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
@@ -27,7 +36,7 @@ def chrome_nav_headers(referer: str, site: str, major: int = 140, platform: str 
 def chrome_script_headers(referer: str, major: int = 140, platform: str = 'Windows', mobile: str = '?0') -> dict:
     base = {
         'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Language': ACCEPT_LANGUAGE,
         'Accept-Encoding': 'gzip, deflate, br, zstd',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
@@ -44,7 +53,7 @@ def chrome_script_headers(referer: str, major: int = 140, platform: str = 'Windo
 def chrome_xhr_headers(referer: str, origin: str, site: str, major: int = 140, platform: str = 'Windows', mobile: str = '?0') -> dict:
     base = {
         'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Language': ACCEPT_LANGUAGE,
         'Accept-Encoding': 'gzip, deflate, br, zstd',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
