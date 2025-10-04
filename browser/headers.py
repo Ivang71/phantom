@@ -1,13 +1,18 @@
-def chrome_nav_headers(referer: str, site: str) -> dict:
+def _sec_ch_headers(major: int, platform: str, mobile: str) -> dict:
     return {
+        'sec-ch-ua': f'"Chromium";v="{major}", "Not=A?Brand";v="24", "Google Chrome";v="{major}"',
+        'sec-ch-ua-mobile': mobile,
+        'sec-ch-ua-platform': f'"{platform}"',
+    }
+
+
+def chrome_nav_headers(referer: str, site: str, major: int = 140, platform: str = 'Windows', mobile: str = '?0') -> dict:
+    base = {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept-Encoding': 'gzip, deflate, br, zstd',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
-        'sec-ch-ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Google Chrome";v="140"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
         'sec-fetch-dest': 'document',
         'sec-fetch-mode': 'navigate',
         'sec-fetch-site': site,
@@ -15,36 +20,34 @@ def chrome_nav_headers(referer: str, site: str) -> dict:
         'upgrade-insecure-requests': '1',
         'Referer': referer,
     }
+    base.update(_sec_ch_headers(major, platform, mobile))
+    return base
 
 
-def chrome_script_headers(referer: str) -> dict:
-    return {
+def chrome_script_headers(referer: str, major: int = 140, platform: str = 'Windows', mobile: str = '?0') -> dict:
+    base = {
         'Accept': '*/*',
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept-Encoding': 'gzip, deflate, br, zstd',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
-        'sec-ch-ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Google Chrome";v="140"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
         'sec-fetch-dest': 'script',
         'sec-fetch-mode': 'no-cors',
         'sec-fetch-site': 'cross-site',
         'sec-fetch-storage-access': 'active',
         'Referer': referer,
     }
+    base.update(_sec_ch_headers(major, platform, mobile))
+    return base
 
 
-def chrome_xhr_headers(referer: str, origin: str, site: str) -> dict:
-    return {
+def chrome_xhr_headers(referer: str, origin: str, site: str, major: int = 140, platform: str = 'Windows', mobile: str = '?0') -> dict:
+    base = {
         'Accept': '*/*',
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept-Encoding': 'gzip, deflate, br, zstd',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
-        'sec-ch-ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Google Chrome";v="140"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Windows"',
         'sec-fetch-dest': 'empty',
         'sec-fetch-mode': 'cors',
         'sec-fetch-site': site,
@@ -52,5 +55,7 @@ def chrome_xhr_headers(referer: str, origin: str, site: str) -> dict:
         'Referer': referer,
         'priority': 'u=1, i',
     }
+    base.update(_sec_ch_headers(major, platform, mobile))
+    return base
 
 

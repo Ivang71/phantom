@@ -5,13 +5,13 @@ from urllib.parse import urlparse
 
 from net.client import RnetBrowser
 from browser.headers import chrome_nav_headers, chrome_script_headers, chrome_xhr_headers
+from browser.ua import generate_user_agent
 from route.popcash import build_go, next_url_from, extract_probe
 
 PUBLISHER = os.environ.get("PUBLISHER_URL", "https://globalstreaming.lol/")
 TARGET = os.environ.get("TARGET_URL", "https://eus.lat/")
 UID = os.environ.get("POP_UID", "495017")
 WID = os.environ.get("POP_WID", "746000")
-UA  = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
 
 async def run_port(port: int):
     proxy = None
@@ -22,10 +22,11 @@ async def run_port(port: int):
     )
     if pu and pp and ph and port:
         proxy = f"http://{pu}:{pp}@{ph}:{port}"
-    b = RnetBrowser(UA, proxy)
+    ua, ua_meta = generate_user_agent(port)
+    b = RnetBrowser(ua, proxy)
 
     # optional: script load (behavioural signal)
-    sh = chrome_script_headers(TARGET)
+    sh = chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'])
     print(f"=> GET https://cdn.popcash.net/show.js")
     _ = await b.get("https://cdn.popcash.net/show.js", sh, timeout=8)
 
@@ -33,7 +34,7 @@ async def run_port(port: int):
     try:
         tgt = urlparse(TARGET)
         origin = f"{tgt.scheme}://{tgt.netloc}"
-        xh = chrome_xhr_headers(TARGET, origin, 'cross-site')
+        xh = chrome_xhr_headers(TARGET, origin, 'cross-site', ua_meta['major'], ua_meta['platform'], ua_meta['mobile'])
         print(f"=> GET https://dcba.popcash.net/znWaa3gu")
         _ = await b.get("https://dcba.popcash.net/znWaa3gu", xh, timeout=5)
     except Exception:
@@ -50,7 +51,7 @@ async def run_port(port: int):
             site_ctx = 'same-origin' if cur_host == ref_host else 'cross-site'
         except Exception:
             site_ctx = 'cross-site'
-        h = chrome_nav_headers(referer, site_ctx)
+        h = chrome_nav_headers(referer, site_ctx, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'])
         print(f"=> GET {url}")
         r = await b.get(url, h, timeout=10)
         loc = r['headers'].get('location') or r['headers'].get('Location')
@@ -62,7 +63,7 @@ async def run_port(port: int):
         probe = extract_probe(r['text'])
         if probe:
             print(f"=> GET {probe}")
-            _ = await b.get(probe, chrome_script_headers(TARGET), timeout=5)
+            _ = await b.get(probe, chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile']), timeout=5)
 
         nxt = next_url_from(r['url'], r['headers'], r['text'])
         if not nxt:
