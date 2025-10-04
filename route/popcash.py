@@ -2,6 +2,7 @@ import re, time, random
 import urllib.parse as u
 
 CL_RE = re.compile(r'https?://p\.pcdelv\.com/v2/[^"\']+/cl\b', re.I)
+REFRESH_RE = re.compile(r"\d+\s*;\s*url\s*=\s*([^;]+)", re.I)
 TOP_LOC_RE = re.compile(r"top\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", re.I)
 DCBA_RE = re.compile(r"https?://dcba\.popcash\.net/[A-Za-z0-9]+", re.I)
 
@@ -16,6 +17,11 @@ def next_url_from(resp_url: str, headers: dict, text: str) -> str | None:
     loc = headers.get('location') or headers.get('Location')
     if loc:
         return u.urljoin(resp_url, loc)
+    refresh = headers.get('refresh') or headers.get('Refresh')
+    if refresh:
+        mref = REFRESH_RE.search(refresh)
+        if mref:
+            return u.urljoin(resp_url, mref.group(1).strip())
     m = TOP_LOC_RE.search(text or '')
     if m:
         return u.urljoin(resp_url, m.group(1))
