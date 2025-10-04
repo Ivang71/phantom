@@ -39,9 +39,21 @@ class TlsBrowser:
             except Exception:
                 text = ''
         hdrs = {}
+        set_cookie_values: list[str] = []
         try:
+            # collect headers (lowercased) and try to preserve multiple Set-Cookie
+            get_all = getattr(resp.headers, 'get_all', None)
+            if callable(get_all):
+                sc_list = get_all('set-cookie') or get_all('Set-Cookie') or []
+                set_cookie_values.extend([str(x) for x in sc_list])
             for k, v in resp.headers.items():
-                hdrs[str(k).lower()] = v
+                kl = str(k).lower()
+                hdrs[kl] = v
+                if kl == 'set-cookie':
+                    if isinstance(v, (list, tuple)):
+                        set_cookie_values.extend([str(x) for x in v])
+                    elif v is not None:
+                        set_cookie_values.append(str(v))
         except Exception:
             pass
         try:
@@ -49,7 +61,26 @@ class TlsBrowser:
         except Exception:
             final_url = url
         status = getattr(resp, 'status_code', None)
-        return { 'status': status, 'url': final_url, 'headers': hdrs, 'content': body, 'text': text }
+        # Best-effort dump of cookie jar
+        jar_cookies: list[str] = []
+        try:
+            jar = getattr(self.session, 'cookies', None)
+            if isinstance(jar, dict):
+                for k, v in jar.items():
+                    jar_cookies.append(f"{k}={v}")
+            elif jar is not None:
+                # try iterable of cookie-like objects
+                for c in jar:
+                    try:
+                        name = getattr(c, 'name', None)
+                        value = getattr(c, 'value', None)
+                        if name is not None and value is not None:
+                            jar_cookies.append(f"{name}={value}")
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return { 'status': status, 'url': final_url, 'headers': hdrs, 'content': body, 'text': text, 'set_cookies': set_cookie_values, 'jar_cookies': jar_cookies }
 
     async def get(self, url: str, headers: dict, timeout: int = 10) -> dict:
         return await self._do('get', url, headers, timeout, follow=False)

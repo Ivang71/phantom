@@ -8,8 +8,13 @@ def set_accept_language(value: str) -> None:
 
 
 def _sec_ch_headers(major: int, platform: str, mobile: str) -> dict:
+    include_google = os.environ.get('SECCH_GOOGLE_BRAND', '0') == '1'
+    if include_google:
+        secch = f'"Chromium";v="{major}", "Not=A?Brand";v="24", "Google Chrome";v="{major}"'
+    else:
+        secch = f'"Not=A?Brand";v="24", "Chromium";v="{major}"'
     return {
-        'sec-ch-ua': f'"Chromium";v="{major}", "Not=A?Brand";v="24", "Google Chrome";v="{major}"',
+        'sec-ch-ua': secch,
         'sec-ch-ua-mobile': mobile,
         'sec-ch-ua-platform': f'"{platform}"',
     }
@@ -25,6 +30,7 @@ def chrome_nav_headers(referer: str, site: str, major: int = 140, platform: str 
         'sec-fetch-dest': 'document',
         'sec-fetch-mode': 'navigate',
         'sec-fetch-site': site,
+        'sec-fetch-user': '?1',
         'priority': 'u=0, i',
         'upgrade-insecure-requests': '1',
         'Referer': referer,
@@ -43,7 +49,7 @@ def chrome_script_headers(referer: str, major: int = 140, platform: str = 'Windo
         'sec-fetch-dest': 'script',
         'sec-fetch-mode': 'no-cors',
         'sec-fetch-site': 'cross-site',
-        'sec-fetch-storage-access': 'active',
+        'sec-fetch-storage-access': 'none',
         'Referer': referer,
     }
     base.update(_sec_ch_headers(major, platform, mobile))

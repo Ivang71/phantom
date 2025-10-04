@@ -1,5 +1,43 @@
 #!/usr/bin/env python3
 import os, time, random, asyncio
+try:
+    from dotenv import load_dotenv, find_dotenv  # type: ignore
+    from pathlib import Path
+    # Priority: ENV_PATH -> nearest .env from CWD -> .env next to this file -> ~/.env
+    _ENV_CANDIDATE = os.environ.get('ENV_PATH')
+    if _ENV_CANDIDATE:
+        load_dotenv(dotenv_path=_ENV_CANDIDATE, override=True)
+    else:
+        _FOUND = find_dotenv(usecwd=True)
+        if _FOUND:
+            load_dotenv(dotenv_path=_FOUND, override=True)
+        load_dotenv(dotenv_path=Path(__file__).resolve().parent / '.env', override=False)
+        load_dotenv(dotenv_path=Path.home() / '.env', override=False)
+except Exception:
+    # Fallback minimal .env loader (KEY=VALUE) if python-dotenv is unavailable
+    try:
+        from pathlib import Path
+        def _load_env_file(p: 'Path') -> None:
+            if not p.exists():
+                return
+            try:
+                for line in p.read_text().splitlines():
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    if '=' not in line:
+                        continue
+                    k, v = line.split('=', 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    os.environ.setdefault(k, v)
+            except Exception:
+                pass
+        _load_env_file(Path.cwd() / '.env')
+        _load_env_file(Path(__file__).resolve().parent / '.env')
+        _load_env_file(Path.home() / '.env')
+    except Exception:
+        pass
 import urllib.parse as u
 from urllib.parse import urlparse
 
@@ -9,9 +47,20 @@ from browser.ua import generate_user_agent
 from route.popcash import build_go, next_url_from, extract_probe
 from net.geo import detect_geo_via_proxy, locale_from_country, accept_language_header_from_locale
 
-TARGET = os.environ.get("TARGET_URL", "https://industrial-gaming.sbs/")
-UID = os.environ.get("POP_UID", "495426")
-WID = os.environ.get("POP_WID", "746571")
+TARGET = os.environ.get("TARGET_URL")
+UID = os.environ.get("POP_UID")
+WID = os.environ.get("POP_WID")
+
+def env_flag(name: str, default: bool = False) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+LOG_HEADERS = env_flag('LOG_HEADERS', '0')
+LOG_COOKIES = env_flag('LOG_COOKIES', '0')
+DWELL_PRE_MS = int(os.environ.get('DWELL_PRE_MS', '0'))
+DWELL_POST_MS = int(os.environ.get('DWELL_POST_MS', '0'))
 
 async def run_port(port: int):
     proxy = None
@@ -52,6 +101,12 @@ async def run_port(port: int):
         _ = await b.get("https://dcba.popcash.net/znWaa3gu", xh, timeout=5)
     except Exception:
         pass
+    # Optional dwell before launching the redirect chain
+    try:
+        if DWELL_PRE_MS > 0:
+            await asyncio.sleep(DWELL_PRE_MS / 1000.0)
+    except Exception:
+        pass
 
     url = build_go(TARGET, UID, WID)
     chain = []
@@ -72,6 +127,20 @@ async def run_port(port: int):
         r = await b.get(url, h, timeout=10)
         loc = r['headers'].get('location') or r['headers'].get('Location')
         ctype = r['headers'].get('content-type') or r['headers'].get('Content-Type')
+        # optional cookie/header logging
+        if LOG_COOKIES:
+            sc = r.get('set_cookies') or []
+            if sc:
+                for c in sc:
+                    print(f"[SET-COOKIE] {c}")
+            sc1 = r['headers'].get('set-cookie')
+            if sc1:
+                print(f"[SET-COOKIE] {sc1}")
+            jc = r.get('jar_cookies') or []
+            if jc:
+                print(f"[JAR] {'; '.join(jc)}")
+        if LOG_HEADERS:
+            print(f"[HEADERS] {r['headers']}")
         print(f"<= {r['status']} {r['url']} len={len(r['content'])} ct={ctype or '-'}{f' loc={loc[:50]}' if loc else ''}")
         chain.append(r['status'])
         seen_urls.add(r['url'])
@@ -101,6 +170,19 @@ async def run_port(port: int):
                     r = await b.get(nxt_from_cl, h, timeout=10)
                     loc_final = r['headers'].get('location') or r['headers'].get('Location')
                     ctype = r['headers'].get('content-type') or r['headers'].get('Content-Type')
+                    if LOG_COOKIES:
+                        sc = r.get('set_cookies') or []
+                        if sc:
+                            for c in sc:
+                                print(f"[SET-COOKIE] {c}")
+                        sc1 = r['headers'].get('set-cookie')
+                        if sc1:
+                            print(f"[SET-COOKIE] {sc1}")
+                        jc = r.get('jar_cookies') or []
+                        if jc:
+                            print(f"[JAR] {'; '.join(jc)}")
+                    if LOG_HEADERS:
+                        print(f"[HEADERS] {r['headers']}")
                     print(f"<= {r['status']} {r['url']} len={len(r['content'])} ct={ctype or '-'}{f' loc={loc_final[:50]}' if loc_final else ''}")
                     chain.append(r['status'])
                     # Try to fire impression/view pixels referenced in final HTML
@@ -155,6 +237,12 @@ async def run_port(port: int):
             continue
         break
 
+    # Optional dwell after final hop to allow async beacons
+    try:
+        if DWELL_POST_MS > 0:
+            await asyncio.sleep(DWELL_POST_MS / 1000.0)
+    except Exception:
+        pass
     print("Status chain:", " → ".join(map(str, chain)))
     print("Final URL   :", r['url'])
 
