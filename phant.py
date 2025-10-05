@@ -298,20 +298,6 @@ async def main():
         loop.set_default_executor(_futures.ThreadPoolExecutor(max_workers=MAX_THREADS))
     except Exception:
         pass
-    async def worker(worker_id: int):
-        if STAGGER_START_MS > 0:
-            delay_s = (STAGGER_START_MS / max(1, NUMBER_OF_WORKERS)) * worker_id / 1000.0
-            await asyncio.sleep(delay_s)
-        cycle = 0
-        while True:
-            _p(lambda: f"\n=== cycle {cycle} ===")
-            try:
-                await run_cycle(cycle)
-            except Exception as e:
-                print(f"[cycle {cycle}] error: {e}")
-            await asyncio.sleep(0.05)
-            cycle += 1
-
     num_workers = max(1, NUMBER_OF_WORKERS)
     worker_cycles = [0 for _ in range(num_workers)]
 
@@ -345,7 +331,7 @@ async def main():
             try:
                 await run_cycle(cycle)
             except Exception as e:
-                print(f"[cycle {cycle}] error: {e}")
+                print(f"[worker {worker_id}] error: {e}")
             worker_cycles[worker_id] = cycle + 1
             await asyncio.sleep(0.05)
             cycle += 1
