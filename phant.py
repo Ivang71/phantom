@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, time, random, asyncio, contextlib
+import os, time, random, asyncio, contextlib, json
 try:
     from dotenv import load_dotenv, find_dotenv  # type: ignore
     from pathlib import Path
@@ -46,7 +46,7 @@ from net.client import TlsBrowser
 from browser.headers import chrome_nav_headers, chrome_script_headers, chrome_xhr_headers
 from browser.ua import generate_user_agent
 from route.popcash import build_go, next_url_from, extract_probe
-from net.geo import detect_geo_via_proxy, locale_from_country, accept_language_header_from_locale
+from net.geo import locale_from_country, accept_language_header_from_locale
 
 TARGET = os.environ.get("TARGET_URL")
 UID = os.environ.get("POP_UID")
@@ -67,39 +67,70 @@ _cores = (os.cpu_count() or 4)
 _auto_threads = min(4096, max(_cores * 8, NUMBER_OF_WORKERS * 8))
 MAX_THREADS = int(os.environ.get('MAX_THREADS') or _auto_threads)
 STAGGER_START_MS = int(os.environ.get('STAGGER_START_MS', '15000'))
+VERBOSE = env_flag('VERBOSE', False)
+SILENT = env_flag('SILENT', False)
 
-async def run_port(port: int):
-    proxy = None
-    pu, pp, ph = (
-        os.environ.get("PROXY_USER"),
-        os.environ.get("PROXY_PASS"),
-        os.environ.get("PROXY_HOST"),
-    )
-    if pu and pp and ph and port:
-        proxy = f"http://{pu}:{pp}@{ph}:{port}"
-    ua, ua_meta = generate_user_agent(port)
+def _p(msg):
+    if SILENT:
+        return
+    try:
+        out = msg() if callable(msg) else msg
+        if not isinstance(out, str):
+            out = str(out)
+    except Exception:
+        return
+    print(out)
 
-    async def detect_accept_language_for_port() -> str | None:
-        try:
-            g = await asyncio.to_thread(
-                detect_geo_via_proxy,
-                os.environ.get("PROXY_HOST"),
-                os.environ.get("PROXY_USER"),
-                os.environ.get("PROXY_PASS"),
-                port,
-            )
-            if g and g.get('countryCode'):
-                locale = locale_from_country(g['countryCode'])
-                return accept_language_header_from_locale(locale)
-        except Exception:
-            return None
-        return None
-    # Chrome-like TLS + redirect following via tls-client only
+def _u(s: str) -> str:
+    try:
+        s = str(s)
+    except Exception:
+        return ""
+    return s if len(s) <= 70 else f"{s[:67]}..."
+
+COUNTRIES = [
+    "Australia", "Austria", "Belgium", "Canada", "Czechia", "Denmark", "Finland",
+    "France", "Germany", "HongKong", "Ireland", "Israel", "Italy", "Japan",
+    "Liechtenstein", "Luxembourg", "Netherlands", "NewZealand", "Norway", "Singapore",
+    "Spain", "Sweden", "Switzerland", "Taiwan", "UnitedArabEmirates", "UnitedKingdom",
+    "UnitedStates",
+]
+
+NAME_TO_CC = {
+    "Australia": "AU", "Austria": "AT", "Belgium": "BE", "Canada": "CA", "Czechia": "CZ",
+    "Denmark": "DK", "Finland": "FI", "France": "FR", "Germany": "DE", "HongKong": "HK",
+    "Ireland": "IE", "Israel": "IL", "Italy": "IT", "Japan": "JP", "Liechtenstein": "LI",
+    "Luxembourg": "LU", "Netherlands": "NL", "NewZealand": "NZ", "Norway": "NO",
+    "Singapore": "SG", "Spain": "ES", "Sweden": "SE", "Switzerland": "CH", "Taiwan": "TW",
+    "UnitedArabEmirates": "AE", "UnitedKingdom": "GB", "UnitedStates": "US",
+}
+
+def _gen_session_token(n: int = 16) -> str:
+    alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    return "".join(random.choice(alphabet) for _ in range(n))
+
+async def run_cycle(cycle: int):
+    pu = os.environ.get("PROXY_USER")
+    pp = os.environ.get("PROXY_PASS")
+    ph = os.environ.get("PROXY_HOST")
+    pport = os.environ.get("PROXY_PORT")
+    ua, ua_meta = generate_user_agent(cycle)
+
+    country = random.choice(COUNTRIES)
+    cc = NAME_TO_CC.get(country, "US")
+    session_token = _gen_session_token()
+    pwd = f"{pp}_country-{country}_session-{session_token}" if pp else None
+    proxy = f"http://{pu}:{pwd}@{ph}:{pport}" if pu and pwd and ph and pport else None
+    locale = locale_from_country(cc)
+    al = accept_language_header_from_locale(locale)
+    if VERBOSE:
+        tok_disp = f"{session_token[:6]}...{session_token[-4:]}" if len(session_token) > 10 else session_token
+        _p(lambda: f"[VERBOSE] cycle={cycle} country={country} cc={cc} token={tok_disp} proxy={ph}:{pport}")
+
     b = TlsBrowser(ua, proxy)
 
     # optional: load tag script with target referer
     try:
-        al = await detect_accept_language_for_port()
         sh = chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
         # print(f"=> GET https://cdn.popcash.net/show.js")
         # _ = await b.get("https://cdn.popcash.net/show.js", sh, timeout=8)
@@ -110,9 +141,8 @@ async def run_port(port: int):
     try:
         tgt = urlparse(TARGET)
         origin = f"{tgt.scheme}://{tgt.netloc}"
-        al = await detect_accept_language_for_port()
         xh = chrome_xhr_headers(TARGET, origin, 'cross-site', ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
-        print(f"=> GET https://dcba.popcash.net/znWaa3gu")
+        _p(lambda: f"=> GET {_u('https://dcba.popcash.net/znWaa3gu')}")
         _ = await b.get("https://dcba.popcash.net/znWaa3gu", xh, timeout=5)
     except Exception:
         pass
@@ -137,10 +167,8 @@ async def run_port(port: int):
             site_ctx = 'same-origin' if cur_host == ref_host else 'cross-site'
         except Exception:
             site_ctx = 'cross-site'
-        # Always re-detect geo per request for per-proxy alignment
-        al = await detect_accept_language_for_port()
         h = chrome_nav_headers(referer, site_ctx, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
-        print(f"=> GET {url}")
+        _p(lambda: f"=> GET {_u(url)}")
         r = await b.get(url, h, timeout=10)
         loc = r['headers'].get('location') or r['headers'].get('Location')
         ctype = r['headers'].get('content-type') or r['headers'].get('Content-Type')
@@ -149,25 +177,24 @@ async def run_port(port: int):
             sc = r.get('set_cookies') or []
             if sc:
                 for c in sc:
-                    print(f"[SET-COOKIE] {c}")
+                    _p(lambda: f"[SET-COOKIE] {c}")
             sc1 = r['headers'].get('set-cookie')
             if sc1:
-                print(f"[SET-COOKIE] {sc1}")
+                _p(lambda: f"[SET-COOKIE] {sc1}")
             jc = r.get('jar_cookies') or []
             if jc:
-                print(f"[JAR] {'; '.join(jc)}")
+                _p(lambda: f"[JAR] {'; '.join(jc)}")
         if LOG_HEADERS:
-            print(f"[HEADERS] {r['headers']}")
-        print(f"<= {r['status']} {r['url']} len={len(r['content'])} ct={ctype or '-'}{f' loc={loc[:50]}' if loc else ''}")
+            _p(lambda: f"[HEADERS] {r['headers']}")
+        _p(lambda: f"<= {r['status']} {_u(r['url'])} len={len(r['content'])} ct={ctype or '-'}{f' loc={_u(loc)}' if loc else ''}")
         chain.append(r['status'])
         seen_urls.add(r['url'])
 
         # try probe if present to emulate page behaviour
         probe = extract_probe(r['text'])
         if probe:
-            print(f"=> GET {probe}")
-            al_probe = await detect_accept_language_for_port()
-            _ = await b.get(probe, chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al_probe), timeout=5)
+            _p(lambda: f"=> GET {_u(probe)}")
+            _ = await b.get(probe, chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al), timeout=5)
 
         # Check if current URL contains /cl
         if '/cl' in r['url']:
@@ -182,9 +209,8 @@ async def run_port(port: int):
                         site_ctx = 'same-origin' if cur_host == ref_host else 'cross-site'
                     except Exception:
                         site_ctx = 'cross-site'
-                    al_cl = await detect_accept_language_for_port()
-                    h = chrome_nav_headers(r['url'], site_ctx, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al_cl)
-                    print(f"Following /cl once to: {nxt_from_cl}")
+                    h = chrome_nav_headers(r['url'], site_ctx, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
+                    _p(lambda: f"Following /cl once to: {_u(nxt_from_cl)}")
                     # EXACTLY one hop after /cl: do not auto-follow more.
                     r = await b.get(nxt_from_cl, h, timeout=10)
                     loc_final = r['headers'].get('location') or r['headers'].get('Location')
@@ -193,16 +219,16 @@ async def run_port(port: int):
                         sc = r.get('set_cookies') or []
                         if sc:
                             for c in sc:
-                                print(f"[SET-COOKIE] {c}")
+                                _p(lambda: f"[SET-COOKIE] {c}")
                         sc1 = r['headers'].get('set-cookie')
                         if sc1:
-                            print(f"[SET-COOKIE] {sc1}")
+                            _p(lambda: f"[SET-COOKIE] {sc1}")
                         jc = r.get('jar_cookies') or []
                         if jc:
-                            print(f"[JAR] {'; '.join(jc)}")
+                            _p(lambda: f"[JAR] {'; '.join(jc)}")
                     if LOG_HEADERS:
-                        print(f"[HEADERS] {r['headers']}")
-                    print(f"<= {r['status']} {r['url']} len={len(r['content'])} ct={ctype or '-'}{f' loc={loc_final[:50]}' if loc_final else ''}")
+                        _p(lambda: f"[HEADERS] {r['headers']}")
+                    _p(lambda: f"<= {r['status']} {_u(r['url'])} len={len(r['content'])} ct={ctype or '-'}{f' loc={_u(loc_final)}' if loc_final else ''}")
                     chain.append(r['status'])
                     # Try to fire impression/view pixels referenced in final HTML
                     try:
@@ -213,14 +239,13 @@ async def run_port(port: int):
                             if ('popcash' in m or 'pcdelv' in m) and any(x in m for x in ('imp', 'impression', 'pixel', 'view', 'track')):
                                 pixel_urls.add(m)
                         for pu_url in list(pixel_urls)[:5]:
-                            print(f"=> GET {pu_url}")
-                            al_px = await detect_accept_language_for_port()
-                            _ = await b.get(pu_url, chrome_script_headers(r['url'], ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al_px), timeout=5)
+                            _p(lambda pu_url=pu_url: f"=> GET {_u(pu_url)}")
+                            _ = await b.get(pu_url, chrome_script_headers(r['url'], ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al), timeout=5)
                     except Exception:
                         pass
                     break
                 else:
-                    print("[CL] No next URL resolvable from Location/Refresh/body; stopping (no hop performed)")
+                    _p("[CL] No next URL resolvable from Location/Refresh/body; stopping (no hop performed)")
 
         # Generic redirect handling to reach /cl when /go responds with 3xx
         try:
@@ -233,7 +258,7 @@ async def run_port(port: int):
             if loc:
                 next_url = u.urljoin(r['url'], loc)
                 if next_url == r['url'] or next_url in seen_urls:
-                    print(f"[Redirect] loop detected to same/seen URL, stopping: {next_url}")
+                    _p(lambda: f"[Redirect] loop detected to same/seen URL, stopping: {_u(next_url)}")
                     break
                 referer = r['url']
                 url = next_url
@@ -243,7 +268,7 @@ async def run_port(port: int):
                 if not no_loc_retry:
                     # Some variants issue a cookie-setting 3xx without Location first; retry once
                     no_loc_retry = True
-                    print(f"[Redirect] {code} without Location; headers: {r['headers']}")
+                    _p(lambda: f"[Redirect] {code} without Location; headers: {r['headers']}")
                     await asyncio.sleep(random.uniform(0.05, 0.15))
                     continue
 
@@ -263,8 +288,8 @@ async def run_port(port: int):
             await asyncio.sleep(DWELL_POST_MS / 1000.0)
     except Exception:
         pass
-    print("Status chain:", " → ".join(map(str, chain)))
-    print("Final URL   :", r['url'])
+    _p(lambda: "Status chain: " + " → ".join(map(str, chain)))
+    _p(lambda: "Final URL   : " + _u(r['url']))
 
 async def main():
     # Ensure enough threads for asyncio.to_thread (geo lookups, tls-client calls)
@@ -273,34 +298,62 @@ async def main():
         loop.set_default_executor(_futures.ThreadPoolExecutor(max_workers=MAX_THREADS))
     except Exception:
         pass
-    PORT_START = 10000
-    PORT_END = 20000
-    next_port = PORT_START
-    lock = asyncio.Lock()
+    async def worker(worker_id: int):
+        if STAGGER_START_MS > 0:
+            delay_s = (STAGGER_START_MS / max(1, NUMBER_OF_WORKERS)) * worker_id / 1000.0
+            await asyncio.sleep(delay_s)
+        cycle = 0
+        while True:
+            _p(lambda: f"\n=== cycle {cycle} ===")
+            try:
+                await run_cycle(cycle)
+            except Exception as e:
+                print(f"[cycle {cycle}] error: {e}")
+            await asyncio.sleep(0.05)
+            cycle += 1
 
-    async def get_next_port() -> int:
-        nonlocal next_port
-        async with lock:
-            p = next_port
-            next_port = PORT_START if p >= PORT_END else p + 1
-            return p
+    num_workers = max(1, NUMBER_OF_WORKERS)
+    worker_cycles = [0 for _ in range(num_workers)]
+
+    async def reporter():
+        report_path = os.environ.get("CYCLES_REPORT_PATH") or os.path.join(os.path.dirname(__file__), "cycles.json")
+        while True:
+            try:
+                total = sum(worker_cycles)
+                payload = {
+                    "timestamp": int(time.time()),
+                    "total": int(total),
+                    "workers": int(num_workers),
+                    "per_worker": list(worker_cycles),
+                }
+                tmp_path = report_path + ".tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+                    f.write("\n")
+                os.replace(tmp_path, report_path)
+            except Exception:
+                pass
+            await asyncio.sleep(60)
 
     async def worker(worker_id: int):
         if STAGGER_START_MS > 0:
             delay_s = (STAGGER_START_MS / max(1, NUMBER_OF_WORKERS)) * worker_id / 1000.0
             await asyncio.sleep(delay_s)
+        cycle = 0
         while True:
-            port = await get_next_port()
-            print(f"\n=== PORT {port} ===")
+            _p(lambda: f"\n=== cycle {cycle} ===")
             try:
-                await run_port(port)
+                await run_cycle(cycle)
             except Exception as e:
-                print(f"[PORT {port}] error: {e}")
+                print(f"[cycle {cycle}] error: {e}")
+            worker_cycles[worker_id] = cycle + 1
             await asyncio.sleep(0.05)
+            cycle += 1
 
-    workers = [asyncio.create_task(worker(i)) for i in range(max(1, NUMBER_OF_WORKERS))]
+    workers = [asyncio.create_task(worker(i)) for i in range(num_workers)]
+    rep = asyncio.create_task(reporter())
     with contextlib.suppress(asyncio.CancelledError):
-        await asyncio.gather(*workers)
+        await asyncio.gather(*workers, rep)
 
 if __name__ == '__main__':
     asyncio.run(main())

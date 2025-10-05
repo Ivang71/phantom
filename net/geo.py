@@ -1,38 +1,4 @@
-import os
-from typing import Optional, TypedDict
-
-import requests
-
-
-class GeoInfo(TypedDict):
-    countryCode: str
-    timezone: str
-    lat: float
-    lon: float
-
-
-def detect_geo_via_proxy(host: Optional[str], user: Optional[str], pwd: Optional[str], port: int, timeout: int = 6) -> Optional[GeoInfo]:
-    if not host or not port:
-        return None
-    auth = f"{user}:{pwd}@" if user and pwd else ""
-    proxy_url = f"http://{auth}{host}:{port}"
-    url = "http://ip-api.com/json?fields=status,countryCode,timezone,lat,lon"
-    proxies = {"http": proxy_url, "https": proxy_url}
-    try:
-        r = requests.get(url, proxies=proxies, timeout=timeout)
-        if not r.ok:
-            return None
-        data = r.json()
-        if data and data.get("status") == "success" and data.get("countryCode") and data.get("timezone"):
-            return {
-                "countryCode": str(data.get("countryCode")),
-                "timezone": str(data.get("timezone")),
-                "lat": float(data.get("lat") or 0.0),
-                "lon": float(data.get("lon") or 0.0),
-            }
-    except Exception:
-        return None
-    return None
+from typing import Optional
 
 
 def locale_from_country(country_code: Optional[str]) -> str:
