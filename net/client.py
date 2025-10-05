@@ -10,7 +10,6 @@ class TlsBrowser:
         except Exception as e:
             raise RuntimeError("tls-client python bindings are required. Install with: pip install tls-client") from e
         profile = os.environ.get("TLS_CLIENT_PROFILE", "chrome_140")
-        self._tls_mod = tls_client  # type: ignore
         self.session = tls_client.Session(
             client_identifier=profile,
             random_tls_extension_order=True,
@@ -85,5 +84,4 @@ class TlsBrowser:
     async def get(self, url: str, headers: dict, timeout: int = 10) -> dict:
         return await self._do('get', url, headers, timeout, follow=False)
 
-    async def get_follow(self, url: str, headers: dict, timeout: int = 10) -> dict:
-        return await self._do('get', url, headers, timeout, follow=True)
+    # follow variant currently unused; keep minimal surface

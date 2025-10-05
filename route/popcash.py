@@ -1,7 +1,6 @@
 import os, re, time, random
 import urllib.parse as u
 
-CL_RE = re.compile(r'https?://p\.pcdelv\.com/v2/[^"\']+/cl\b', re.I)
 REFRESH_RE = re.compile(r"\d+\s*;\s*url\s*=\s*([^;]+)", re.I)
 TOP_LOC_RE = re.compile(r"top\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", re.I)
 DCBA_RE = re.compile(r"https?://dcba\.popcash\.net/[A-Za-z0-9]+", re.I)
