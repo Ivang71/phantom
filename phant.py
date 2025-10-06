@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, time, random, asyncio, contextlib
+import os, time, random, asyncio, contextlib, json
 try:
     from dotenv import load_dotenv, find_dotenv  # type: ignore
     from pathlib import Path
@@ -60,6 +60,7 @@ def env_flag(name: str, default: bool = False) -> bool:
 
 LOG_HEADERS = env_flag('LOG_HEADERS', False)
 LOG_COOKIES = env_flag('LOG_COOKIES', False)
+SILENT = env_flag('SILENT', False)
 DWELL_PRE_MS = int(os.environ.get('DWELL_PRE_MS', '0'))
 DWELL_POST_MS = int(os.environ.get('DWELL_POST_MS', '0'))
 NUMBER_OF_WORKERS = int(os.environ.get('NUMBER_OF_WORKERS'))
@@ -67,8 +68,10 @@ _cores = (os.cpu_count() or 4)
 _auto_threads = min(4096, max(_cores * 8, NUMBER_OF_WORKERS * 8))
 MAX_THREADS = int(os.environ.get('MAX_THREADS') or _auto_threads)
 STAGGER_START_MS = int(os.environ.get('STAGGER_START_MS', '15000'))
+STATS_FILE = os.environ.get('STATS_FILE', 'bot-stats.json')
+STATS_INTERVAL_SEC = float(os.environ.get('STATS_INTERVAL_SEC', '60'))
 
-async def run_port(port: int):
+async def run_port(port: int) -> bool:
     proxy = None
     pu, pp, ph = (
         os.environ.get("PROXY_USER"),
@@ -112,7 +115,8 @@ async def run_port(port: int):
         origin = f"{tgt.scheme}://{tgt.netloc}"
         al = await detect_accept_language_for_port()
         xh = chrome_xhr_headers(TARGET, origin, 'cross-site', ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
-        print(f"=> GET https://dcba.popcash.net/znWaa3gu")
+        if not SILENT:
+            print(f"=> GET https://dcba.popcash.net/znWaa3gu")
         _ = await b.get("https://dcba.popcash.net/znWaa3gu", xh, timeout=5)
     except Exception:
         pass
@@ -130,6 +134,7 @@ async def run_port(port: int):
     no_loc_retry = False  # Retry once if 3xx without Location
     seen_urls: set[str] = set()
 
+    external_hop_done = False
     while True:
         try:
             cur_host = urlparse(url).netloc
@@ -140,12 +145,13 @@ async def run_port(port: int):
         # Always re-detect geo per request for per-proxy alignment
         al = await detect_accept_language_for_port()
         h = chrome_nav_headers(referer, site_ctx, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
-        print(f"=> GET {url}")
+        if not SILENT:
+            print(f"=> GET {url}")
         r = await b.get(url, h, timeout=10)
         loc = r['headers'].get('location') or r['headers'].get('Location')
         ctype = r['headers'].get('content-type') or r['headers'].get('Content-Type')
         # optional cookie/header logging
-        if LOG_COOKIES:
+        if LOG_COOKIES and not SILENT:
             sc = r.get('set_cookies') or []
             if sc:
                 for c in sc:
@@ -156,16 +162,18 @@ async def run_port(port: int):
             jc = r.get('jar_cookies') or []
             if jc:
                 print(f"[JAR] {'; '.join(jc)}")
-        if LOG_HEADERS:
+        if LOG_HEADERS and not SILENT:
             print(f"[HEADERS] {r['headers']}")
-        print(f"<= {r['status']} {r['url']} len={len(r['content'])} ct={ctype or '-'}{f' loc={loc[:50]}' if loc else ''}")
+        if not SILENT:
+            print(f"<= {r['status']} {r['url']} len={len(r['content'])} ct={ctype or '-'}{f' loc={loc[:50]}' if loc else ''}")
         chain.append(r['status'])
         seen_urls.add(r['url'])
 
         # try probe if present to emulate page behaviour
         probe = extract_probe(r['text'])
         if probe:
-            print(f"=> GET {probe}")
+            if not SILENT:
+                print(f"=> GET {probe}")
             al_probe = await detect_accept_language_for_port()
             _ = await b.get(probe, chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al_probe), timeout=5)
 
@@ -184,12 +192,13 @@ async def run_port(port: int):
                         site_ctx = 'cross-site'
                     al_cl = await detect_accept_language_for_port()
                     h = chrome_nav_headers(r['url'], site_ctx, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al_cl)
-                    print(f"Following /cl once to: {nxt_from_cl}")
+                    if not SILENT:
+                        print(f"Following /cl once to: {nxt_from_cl}")
                     # EXACTLY one hop after /cl: do not auto-follow more.
                     r = await b.get(nxt_from_cl, h, timeout=10)
                     loc_final = r['headers'].get('location') or r['headers'].get('Location')
                     ctype = r['headers'].get('content-type') or r['headers'].get('Content-Type')
-                    if LOG_COOKIES:
+                    if LOG_COOKIES and not SILENT:
                         sc = r.get('set_cookies') or []
                         if sc:
                             for c in sc:
@@ -200,9 +209,10 @@ async def run_port(port: int):
                         jc = r.get('jar_cookies') or []
                         if jc:
                             print(f"[JAR] {'; '.join(jc)}")
-                    if LOG_HEADERS:
+                    if LOG_HEADERS and not SILENT:
                         print(f"[HEADERS] {r['headers']}")
-                    print(f"<= {r['status']} {r['url']} len={len(r['content'])} ct={ctype or '-'}{f' loc={loc_final[:50]}' if loc_final else ''}")
+                    if not SILENT:
+                        print(f"<= {r['status']} {r['url']} len={len(r['content'])} ct={ctype or '-'}{f' loc={loc_final[:50]}' if loc_final else ''}")
                     chain.append(r['status'])
                     # Try to fire impression/view pixels referenced in final HTML
                     try:
@@ -213,14 +223,17 @@ async def run_port(port: int):
                             if ('popcash' in m or 'pcdelv' in m) and any(x in m for x in ('imp', 'impression', 'pixel', 'view', 'track')):
                                 pixel_urls.add(m)
                         for pu_url in list(pixel_urls)[:5]:
-                            print(f"=> GET {pu_url}")
+                            if not SILENT:
+                                print(f"=> GET {pu_url}")
                             al_px = await detect_accept_language_for_port()
                             _ = await b.get(pu_url, chrome_script_headers(r['url'], ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al_px), timeout=5)
                     except Exception:
                         pass
+                    external_hop_done = True
                     break
                 else:
-                    print("[CL] No next URL resolvable from Location/Refresh/body; stopping (no hop performed)")
+                    if not SILENT:
+                        print("[CL] No next URL resolvable from Location/Refresh/body; stopping (no hop performed)")
 
         # Generic redirect handling to reach /cl when /go responds with 3xx
         try:
@@ -233,7 +246,8 @@ async def run_port(port: int):
             if loc:
                 next_url = u.urljoin(r['url'], loc)
                 if next_url == r['url'] or next_url in seen_urls:
-                    print(f"[Redirect] loop detected to same/seen URL, stopping: {next_url}")
+                    if not SILENT:
+                        print(f"[Redirect] loop detected to same/seen URL, stopping: {next_url}")
                     break
                 referer = r['url']
                 url = next_url
@@ -243,7 +257,8 @@ async def run_port(port: int):
                 if not no_loc_retry:
                     # Some variants issue a cookie-setting 3xx without Location first; retry once
                     no_loc_retry = True
-                    print(f"[Redirect] {code} without Location; headers: {r['headers']}")
+                    if not SILENT:
+                        print(f"[Redirect] {code} without Location; headers: {r['headers']}")
                     await asyncio.sleep(random.uniform(0.05, 0.15))
                     continue
 
@@ -263,8 +278,10 @@ async def run_port(port: int):
             await asyncio.sleep(DWELL_POST_MS / 1000.0)
     except Exception:
         pass
-    print("Status chain:", " → ".join(map(str, chain)))
-    print("Final URL   :", r['url'])
+    if not SILENT:
+        print("Status chain:", " → ".join(map(str, chain)))
+        print("Final URL   :", r['url'])
+    return external_hop_done
 
 async def main():
     # Ensure enough threads for asyncio.to_thread (geo lookups, tls-client calls)
@@ -277,6 +294,8 @@ async def main():
     PORT_END = 20000
     next_port = PORT_START
     lock = asyncio.Lock()
+    num_workers = max(1, NUMBER_OF_WORKERS)
+    worker_cycles = [0] * num_workers
 
     async def get_next_port() -> int:
         nonlocal next_port
@@ -291,16 +310,33 @@ async def main():
             await asyncio.sleep(delay_s)
         while True:
             port = await get_next_port()
-            print(f"\n=== PORT {port} ===")
+            if not SILENT:
+                print(f"\n=== PORT {port} ===")
+            success = False
             try:
-                await run_port(port)
+                success = await run_port(port)
             except Exception as e:
-                print(f"[PORT {port}] error: {e}")
+                if not SILENT:
+                    print(f"[PORT {port}] error: {e}")
+            finally:
+                if success:
+                    worker_cycles[worker_id] += 1
             await asyncio.sleep(0.05)
 
-    workers = [asyncio.create_task(worker(i)) for i in range(max(1, NUMBER_OF_WORKERS))]
+    async def stats_reporter():
+        while True:
+            await asyncio.sleep(max(1.0, STATS_INTERVAL_SEC))
+            total = sum(worker_cycles)
+            try:
+                with open(STATS_FILE, 'a') as f:
+                    f.write(json.dumps({"ts": int(time.time()), "total_cycles": total}) + "\n")
+            except Exception:
+                pass
+
+    workers = [asyncio.create_task(worker(i)) for i in range(num_workers)]
+    reporter = asyncio.create_task(stats_reporter())
     with contextlib.suppress(asyncio.CancelledError):
-        await asyncio.gather(*workers)
+        await asyncio.gather(*workers, reporter)
 
 if __name__ == '__main__':
     asyncio.run(main())
