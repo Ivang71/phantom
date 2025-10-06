@@ -69,6 +69,7 @@ MAX_THREADS = int(os.environ.get('MAX_THREADS') or _auto_threads)
 STAGGER_START_MS = int(os.environ.get('STAGGER_START_MS', '15000'))
 VERBOSE = env_flag('VERBOSE', False)
 SILENT = env_flag('SILENT', False)
+HTTP_TIMEOUT = int(os.environ.get('HTTP_TIMEOUT', '60'))
 
 def _p(msg):
     if SILENT:
@@ -143,7 +144,7 @@ async def run_cycle(cycle: int):
         origin = f"{tgt.scheme}://{tgt.netloc}"
         xh = chrome_xhr_headers(TARGET, origin, 'cross-site', ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
         _p(lambda: f"=> GET {_u('https://dcba.popcash.net/znWaa3gu')}")
-        _ = await b.get("https://dcba.popcash.net/znWaa3gu", xh, timeout=5)
+        _ = await b.get("https://dcba.popcash.net/znWaa3gu", xh, timeout=HTTP_TIMEOUT)
     except Exception:
         pass
     # Optional dwell before launching the redirect chain
@@ -169,7 +170,7 @@ async def run_cycle(cycle: int):
             site_ctx = 'cross-site'
         h = chrome_nav_headers(referer, site_ctx, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
         _p(lambda: f"=> GET {_u(url)}")
-        r = await b.get(url, h, timeout=10)
+        r = await b.get(url, h, timeout=HTTP_TIMEOUT)
         loc = r['headers'].get('location') or r['headers'].get('Location')
         ctype = r['headers'].get('content-type') or r['headers'].get('Content-Type')
         # optional cookie/header logging
@@ -194,7 +195,7 @@ async def run_cycle(cycle: int):
         probe = extract_probe(r['text'])
         if probe:
             _p(lambda: f"=> GET {_u(probe)}")
-            _ = await b.get(probe, chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al), timeout=5)
+            _ = await b.get(probe, chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al), timeout=HTTP_TIMEOUT)
 
         # Check if current URL contains /cl
         if '/cl' in r['url']:
@@ -212,7 +213,7 @@ async def run_cycle(cycle: int):
                     h = chrome_nav_headers(r['url'], site_ctx, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
                     _p(lambda: f"Following /cl once to: {_u(nxt_from_cl)}")
                     # EXACTLY one hop after /cl: do not auto-follow more.
-                    r = await b.get(nxt_from_cl, h, timeout=10)
+                    r = await b.get(nxt_from_cl, h, timeout=HTTP_TIMEOUT)
                     loc_final = r['headers'].get('location') or r['headers'].get('Location')
                     ctype = r['headers'].get('content-type') or r['headers'].get('Content-Type')
                     if LOG_COOKIES:
@@ -240,7 +241,7 @@ async def run_cycle(cycle: int):
                                 pixel_urls.add(m)
                         for pu_url in list(pixel_urls)[:5]:
                             _p(lambda pu_url=pu_url: f"=> GET {_u(pu_url)}")
-                            _ = await b.get(pu_url, chrome_script_headers(r['url'], ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al), timeout=5)
+                            _ = await b.get(pu_url, chrome_script_headers(r['url'], ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al), timeout=HTTP_TIMEOUT)
                     except Exception:
                         pass
                     break
@@ -300,17 +301,21 @@ async def main():
         pass
     num_workers = max(1, NUMBER_OF_WORKERS)
     worker_cycles = [0 for _ in range(num_workers)]
+    worker_failures = [0 for _ in range(num_workers)]
 
     async def reporter():
         report_path = os.environ.get("CYCLES_REPORT_PATH") or os.path.join(os.path.dirname(__file__), "cycles.json")
         while True:
             try:
                 total = sum(worker_cycles)
+                failures_total = sum(worker_failures)
                 payload = {
                     "timestamp": int(time.time()),
                     "total": int(total),
                     "workers": int(num_workers),
                     "per_worker": list(worker_cycles),
+                    "failures_total": int(failures_total),
+                    "failures_per_worker": list(worker_failures),
                 }
                 tmp_path = report_path + ".tmp"
                 with open(tmp_path, "w", encoding="utf-8") as f:
@@ -331,6 +336,7 @@ async def main():
             try:
                 await run_cycle(cycle)
             except Exception as e:
+                worker_failures[worker_id] += 1
                 print(f"[worker {worker_id}] error: {e}")
             worker_cycles[worker_id] = cycle + 1
             await asyncio.sleep(0.05)
