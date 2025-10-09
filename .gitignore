@@ -4,6 +4,6 @@ dist
 __pycache__
 
 .env
-cycles.json
+*.json
 
 

@@ -48,9 +48,30 @@ from browser.ua import generate_user_agent
 from route.popcash import build_go, next_url_from, extract_probe
 from net.geo import locale_from_country, accept_language_header_from_locale
 
-TARGET = os.environ.get("TARGET_URL")
-UID = os.environ.get("POP_UID")
-WID = os.environ.get("POP_WID")
+def _parse_sites() -> list[dict]:
+    s = os.environ.get("TARGETS")
+    if s:
+        try:
+            arr = json.loads(s)
+            res = []
+            for it in arr:
+                t = (it.get("TARGET_URL") or it.get("target") or it.get("url") or "").strip()
+                uid = (it.get("POP_UID") or it.get("uid") or "").strip()
+                wid = (it.get("POP_WID") or it.get("wid") or "").strip()
+                if t and uid and wid:
+                    res.append({"TARGET_URL": t, "POP_UID": uid, "POP_WID": wid})
+            if res:
+                return res
+        except Exception:
+            pass
+    # backward compat: single site via env
+    t = (os.environ.get("TARGET_URL") or "").strip()
+    uid = (os.environ.get("POP_UID") or "").strip()
+    wid = (os.environ.get("POP_WID") or "").strip()
+    return ([{"TARGET_URL": t, "POP_UID": uid, "POP_WID": wid}] if t and uid and wid else [])
+
+SITES = _parse_sites()
+CLICKS_PER_DAY = int(os.environ.get("CLICKS_PER_DAY"))
 
 def env_flag(name: str, default: bool = False) -> bool:
     v = os.environ.get(name)
@@ -110,7 +131,7 @@ def _gen_session_token(n: int = 16) -> str:
     alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     return "".join(random.choice(alphabet) for _ in range(n))
 
-async def run_cycle(cycle: int):
+async def run_cycle(cycle: int, target: str, uid: str, wid: str):
     pu = os.environ.get("PROXY_USER")
     pp = os.environ.get("PROXY_PASS")
     ph = os.environ.get("PROXY_HOST")
@@ -132,7 +153,7 @@ async def run_cycle(cycle: int):
 
     # optional: load tag script with target referer
     try:
-        sh = chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
+        sh = chrome_script_headers(target, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
         # print(f"=> GET https://cdn.popcash.net/show.js")
         # _ = await b.get("https://cdn.popcash.net/show.js", sh, timeout=8)
     except Exception:
@@ -140,9 +161,9 @@ async def run_cycle(cycle: int):
 
     # optional: pre-flight probe as XHR like the tag
     try:
-        tgt = urlparse(TARGET)
+        tgt = urlparse(target)
         origin = f"{tgt.scheme}://{tgt.netloc}"
-        xh = chrome_xhr_headers(TARGET, origin, 'cross-site', ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
+        xh = chrome_xhr_headers(target, origin, 'cross-site', ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al)
         _p(lambda: f"=> GET {_u('https://dcba.popcash.net/znWaa3gu')}")
         _ = await b.get("https://dcba.popcash.net/znWaa3gu", xh, timeout=HTTP_TIMEOUT)
     except Exception:
@@ -154,9 +175,9 @@ async def run_cycle(cycle: int):
     except Exception:
         pass
 
-    url = build_go(TARGET, UID, WID)
+    url = build_go(target, uid, wid)
     chain = []
-    referer = TARGET
+    referer = target
     cl_hops = 0  # Track hops after /cl
     no_loc_retry = False  # Retry once if 3xx without Location
     seen_urls: set[str] = set()
@@ -195,7 +216,7 @@ async def run_cycle(cycle: int):
         probe = extract_probe(r['text'])
         if probe:
             _p(lambda: f"=> GET {_u(probe)}")
-            _ = await b.get(probe, chrome_script_headers(TARGET, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al), timeout=HTTP_TIMEOUT)
+            _ = await b.get(probe, chrome_script_headers(target, ua_meta['major'], ua_meta['platform'], ua_meta['mobile'], al), timeout=HTTP_TIMEOUT)
 
         # Check if current URL contains /cl
         if '/cl' in r['url']:
@@ -293,59 +314,107 @@ async def run_cycle(cycle: int):
     _p(lambda: "Final URL   : " + _u(r['url']))
 
 async def main():
-    # Ensure enough threads for asyncio.to_thread (geo lookups, tls-client calls)
     loop = asyncio.get_running_loop()
     try:
         loop.set_default_executor(_futures.ThreadPoolExecutor(max_workers=MAX_THREADS))
     except Exception:
         pass
-    num_workers = max(1, NUMBER_OF_WORKERS)
-    worker_cycles = [0 for _ in range(num_workers)]
-    worker_failures = [0 for _ in range(num_workers)]
+    if not SITES or CLICKS_PER_DAY <= 0:
+        raise RuntimeError("No valid SITES or CLICKS_PER_DAY not set > 0")
 
-    async def reporter():
-        report_path = os.environ.get("CYCLES_REPORT_PATH") or os.path.join(os.path.dirname(__file__), "cycles.json")
+    sem = asyncio.Semaphore(max(1, NUMBER_OF_WORKERS))
+    state_lock = asyncio.Lock()
+
+    def _date_key(ts: float | None = None) -> str:
+        t = time.localtime(ts or time.time())
+        return f"{t.tm_mon}_{t.tm_mday}_{t.tm_year}"
+
+    def _today_path() -> str:
+        return os.path.join(os.path.dirname(__file__), f"{_date_key()}.json")
+
+    async def _load_or_init_state() -> dict:
+        path = _today_path()
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                    if d.get("date") == _date_key():
+                        return d
+        except Exception:
+            pass
+        return {
+            "date": _date_key(),
+            "clicks_per_day": int(CLICKS_PER_DAY),
+            "sites": [
+                {"TARGET_URL": s["TARGET_URL"], "POP_UID": s["POP_UID"], "POP_WID": s["POP_WID"], "clicks_done": 0}
+                for s in SITES
+            ],
+            "last_updated": int(time.time()),
+        }
+
+    state = await _load_or_init_state()
+
+    def _midnight_ts(t: float | None = None) -> float:
+        lt = time.localtime(t or time.time())
+        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, lt.tm_wday, lt.tm_yday, lt.tm_isdst))
+
+    async def daily_reporter():
         while True:
             try:
-                total = sum(worker_cycles)
-                failures_total = sum(worker_failures)
-                payload = {
-                    "timestamp": int(time.time()),
-                    "total": int(total),
-                    "workers": int(num_workers),
-                    "per_worker": list(worker_cycles),
-                    "failures_total": int(failures_total),
-                    "failures_per_worker": list(worker_failures),
-                }
-                tmp_path = report_path + ".tmp"
-                with open(tmp_path, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
-                    f.write("\n")
-                os.replace(tmp_path, report_path)
+                async with state_lock:
+                    cur_key = _date_key()
+                    if state.get("date") != cur_key:
+                        state["date"] = cur_key
+                        state["clicks_per_day"] = int(CLICKS_PER_DAY)
+                        for it in state["sites"]:
+                            it["clicks_done"] = 0
+                    state["last_updated"] = int(time.time())
+                    tmp = _today_path() + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(state, f, ensure_ascii=False, indent=2, sort_keys=True)
+                        f.write("\n")
+                    os.replace(tmp, _today_path())
             except Exception:
                 pass
             await asyncio.sleep(60)
 
-    async def worker(worker_id: int):
-        if STAGGER_START_MS > 0:
-            delay_s = (STAGGER_START_MS / max(1, NUMBER_OF_WORKERS)) * worker_id / 1000.0
-            await asyncio.sleep(delay_s)
+    async def site_worker(idx: int, site: dict):
+        # evenly spread across day
+        interval = 86400.0 / float(CLICKS_PER_DAY)
         cycle = 0
         while True:
-            _p(lambda: f"\n=== cycle {cycle} ===")
-            try:
-                await run_cycle(cycle)
-            except Exception as e:
-                worker_failures[worker_id] += 1
-                print(f"[worker {worker_id}] error: {e}")
-            worker_cycles[worker_id] = cycle + 1
-            await asyncio.sleep(0.05)
-            cycle += 1
+            async with state_lock:
+                cur_key = _date_key()
+                if state.get("date") != cur_key:
+                    state["date"] = cur_key
+                    state["clicks_per_day"] = int(CLICKS_PER_DAY)
+                    for it in state["sites"]:
+                        it["clicks_done"] = 0
+                clicks_done = int(state["sites"][idx]["clicks_done"])
+            base = _midnight_ts()
+            next_ts = base + (clicks_done * interval)
+            now = time.time()
+            delay = max(0.0, next_ts - now)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            async with sem:
+                try:
+                    await run_cycle(cycle, site["TARGET_URL"], site["POP_UID"], site["POP_WID"])
+                    success = True
+                except Exception:
+                    success = False
+                finally:
+                    cycle += 1
+            if success:
+                async with state_lock:
+                    state["sites"][idx]["clicks_done"] = int(state["sites"][idx]["clicks_done"]) + 1
+            # small sleep to avoid tight loop if multiple overdue
+            await asyncio.sleep(0.5)
 
-    workers = [asyncio.create_task(worker(i)) for i in range(num_workers)]
-    rep = asyncio.create_task(reporter())
+    tasks = [asyncio.create_task(site_worker(i, s)) for i, s in enumerate(SITES)]
+    rep = asyncio.create_task(daily_reporter())
     with contextlib.suppress(asyncio.CancelledError):
-        await asyncio.gather(*workers, rep)
+        await asyncio.gather(*tasks, rep)
 
 if __name__ == '__main__':
     asyncio.run(main())
