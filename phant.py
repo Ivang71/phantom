@@ -111,20 +111,14 @@ def _u(s: str) -> str:
     return s if len(s) <= 70 else f"{s[:67]}..."
 
 COUNTRIES = [
-    "Australia", "Austria", "Belgium", "Canada", "Czechia", "Denmark", "Finland",
-    "France", "Germany", "HongKong", "Ireland", "Israel", "Italy", "Japan",
-    "Liechtenstein", "Luxembourg", "Netherlands", "NewZealand", "Norway", "Singapore",
-    "Spain", "Sweden", "Switzerland", "Taiwan", "UnitedArabEmirates", "UnitedKingdom",
-    "UnitedStates",
+    "Australia", "Canada", "Czechia", "Denmark", "Finland",
+    "France", "Germany", "Italy", "Norway",
+    "Spain", "Sweden", "Switzerland", "UnitedKingdom",
 ]
 
 NAME_TO_CC = {
-    "Australia": "AU", "Austria": "AT", "Belgium": "BE", "Canada": "CA", "Czechia": "CZ",
-    "Denmark": "DK", "Finland": "FI", "France": "FR", "Germany": "DE", "HongKong": "HK",
-    "Ireland": "IE", "Israel": "IL", "Italy": "IT", "Japan": "JP", "Liechtenstein": "LI",
-    "Luxembourg": "LU", "Netherlands": "NL", "NewZealand": "NZ", "Norway": "NO",
-    "Singapore": "SG", "Spain": "ES", "Sweden": "SE", "Switzerland": "CH", "Taiwan": "TW",
-    "UnitedArabEmirates": "AE", "UnitedKingdom": "GB", "UnitedStates": "US",
+    "Canada":"CA", "Czechia":"CZ", "Denmark":"DK", "Finland":"FI", "France":"FR", "Germany":"DE",
+    "Italy":"IT", "Norway":"NO", "Spain":"ES", "Sweden":"SE", "Switzerland":"CH", "UnitedKingdom":"GB",
 }
 
 def _gen_session_token(n: int = 16) -> str:
