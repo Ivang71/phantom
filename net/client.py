@@ -25,13 +25,73 @@ class TlsBrowser:
         }
         if self.proxy:
             kwargs['proxy'] = self.proxy
-        resp = await asyncio.to_thread(getattr(self.session, method), url, **kwargs)
+        MAX_BYTES = 8192
+        # Try streaming if library supports it; fall back to full fetch
+        body = b''
+        text = ''
+        resp = None
+        aborted_at_cap = False
         try:
-            body = bytes(resp.content) if resp.content is not None else b''
+            # Attempt streaming mode akin to requests; tls-client may support stream
+            resp = await asyncio.to_thread(getattr(self.session, method), url, stream=True, **kwargs)
+            try:
+                iter_content = getattr(resp, 'iter_content', None)
+                if callable(iter_content):
+                    for chunk in iter_content(chunk_size=2048):
+                        if not chunk:
+                            break
+                        # Accumulate up to MAX_BYTES, then stop
+                        remaining = MAX_BYTES - len(body)
+                        if remaining <= 0:
+                            aborted_at_cap = True
+                            break
+                        body += bytes(chunk[:remaining])
+                        if len(body) >= MAX_BYTES:
+                            aborted_at_cap = True
+                            break
+                    # Ensure underlying connection is closed if there is any remaining
+                    try:
+                        close = getattr(resp, 'close', None)
+                        if callable(close):
+                            close()
+                    except Exception:
+                        pass
+                else:
+                    # Fallback to non-streaming if iter_content unavailable
+                    raise RuntimeError('streaming_not_supported')
+            except Exception:
+                # Fallback: perform normal request and slice
+                resp = await asyncio.to_thread(getattr(self.session, method), url, **kwargs)
+                try:
+                    content = resp.content if getattr(resp, 'content', None) is not None else b''
+                except Exception:
+                    content = b''
+                try:
+                    body = bytes(content[:MAX_BYTES])
+                except Exception:
+                    body = b''
+                try:
+                    aborted_at_cap = isinstance(content, (bytes, bytearray)) and len(content) > MAX_BYTES
+                except Exception:
+                    aborted_at_cap = False
         except Exception:
-            body = b''
+            # Ultimate fallback if streaming kw not accepted
+            resp = await asyncio.to_thread(getattr(self.session, method), url, **kwargs)
+            try:
+                content = resp.content if getattr(resp, 'content', None) is not None else b''
+            except Exception:
+                content = b''
+            try:
+                body = bytes(content[:MAX_BYTES])
+            except Exception:
+                body = b''
+            try:
+                aborted_at_cap = isinstance(content, (bytes, bytearray)) and len(content) > MAX_BYTES
+            except Exception:
+                aborted_at_cap = False
+        # Derive text cheaply from capped body
         try:
-            text = str(resp.text)
+            text = str(getattr(resp, 'text'))
         except Exception:
             try:
                 text = body.decode('utf-8', errors='ignore')
@@ -79,7 +139,7 @@ class TlsBrowser:
                         continue
         except Exception:
             pass
-        return { 'status': status, 'url': final_url, 'headers': hdrs, 'content': body, 'text': text, 'set_cookies': set_cookie_values, 'jar_cookies': jar_cookies }
+        return { 'status': status, 'url': final_url, 'headers': hdrs, 'content': body, 'text': text, 'set_cookies': set_cookie_values, 'jar_cookies': jar_cookies, 'aborted_at_cap': aborted_at_cap }
 
     async def get(self, url: str, headers: dict, timeout: int = 10) -> dict:
         return await self._do('get', url, headers, timeout, follow=False)

@@ -49,7 +49,31 @@ from route.popcash import build_go, next_url_from, extract_probe
 from net.geo import locale_from_country, accept_language_header_from_locale
 
 # Shared blacklist across all workers (domains exceeding size limit)
-BLACKLIST_DOMAINS: set[str] = set()
+# Persisted across restarts via JSON file in the project directory
+BLACKLIST_FILE = os.path.join(os.path.dirname(__file__), "blacklist.json")
+
+def _load_blacklist() -> set[str]:
+    try:
+        if os.path.exists(BLACKLIST_FILE):
+            with open(BLACKLIST_FILE, "r", encoding="utf-8") as f:
+                arr = json.load(f)
+                if isinstance(arr, list):
+                    return set(str(x) for x in arr if x)
+    except Exception:
+        pass
+    return set()
+
+def _save_blacklist(domains: set[str]) -> None:
+    try:
+        tmp = BLACKLIST_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(sorted(list(domains)), f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp, BLACKLIST_FILE)
+    except Exception:
+        pass
+
+BLACKLIST_DOMAINS: set[str] = _load_blacklist()
 
 def _parse_sites() -> list[dict]:
     s = os.environ.get("TARGETS")
@@ -114,21 +138,18 @@ def _u(s: str) -> str:
     return s if len(s) <= 70 else f"{s[:67]}..."
 
 COUNTRIES = [
-    "Australia", "Canada", "Czechia", "Denmark", "Finland",
-    "France", "Germany", "Italy", "Norway",
-    "Spain", "Sweden", "Switzerland", "UnitedKingdom",
+    "France", "Germany", "Italy", "Spain", "Sweden",  "UnitedKingdom",
 ]
 
 NAME_TO_CC = {
-    "Canada":"CA", "Czechia":"CZ", "Denmark":"DK", "Finland":"FI", "France":"FR", "Germany":"DE",
-    "Italy":"IT", "Norway":"NO", "Spain":"ES", "Sweden":"SE", "Switzerland":"CH", "UnitedKingdom":"GB",
+    "France":"FR", "Germany":"DE", "Italy":"IT", "Spain":"ES", "Sweden":"SE", "UnitedKingdom":"GB",
 }
 
 def _gen_session_token(n: int = 16) -> str:
     alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     return "".join(random.choice(alphabet) for _ in range(n))
 
-async def run_cycle(cycle: int, target: str, uid: str, wid: str) -> tuple[str | None, int, str | None]:
+async def run_cycle(cycle: int, target: str, uid: str, wid: str) -> tuple[str | None, int, str | None, bool]:
     pu = os.environ.get("PROXY_USER")
     pp = os.environ.get("PROXY_PASS")
     ph = os.environ.get("PROXY_HOST")
@@ -181,6 +202,7 @@ async def run_cycle(cycle: int, target: str, uid: str, wid: str) -> tuple[str | 
     final_one_hop_url: str | None = None
     final_one_hop_size: int = 0
     blacklisted_domain: str | None = None
+    dropped_due_to_blacklist: bool = False
 
     while True:
         try:
@@ -241,6 +263,7 @@ async def run_cycle(cycle: int, target: str, uid: str, wid: str) -> tuple[str | 
                         _p(lambda: f"[BLACKLIST] Skipping download for domain={dom} url={_u(nxt_from_cl)}")
                         final_one_hop_url = nxt_from_cl
                         final_one_hop_size = 0
+                        dropped_due_to_blacklist = True
                         break
                     # Enforce 8KB cap via Range header to avoid downloading more than limit
                     h2 = dict(h)
@@ -253,6 +276,19 @@ async def run_cycle(cycle: int, target: str, uid: str, wid: str) -> tuple[str | 
                         final_one_hop_size = int(len(r.get('content') or b''))
                     except Exception:
                         final_one_hop_size = 0
+                    # If connection was aborted at cap, immediately persistently blacklist this domain
+                    try:
+                        if r.get('aborted_at_cap'):
+                            if dom:
+                                blacklisted_domain = dom
+                            else:
+                                try:
+                                    blacklisted_domain = urlparse(final_one_hop_url).netloc if final_one_hop_url else None
+                                except Exception:
+                                    blacklisted_domain = None
+                            dropped_due_to_blacklist = True
+                    except Exception:
+                        pass
                     # If reported or implied total size exceeds 8KB, mark domain for blacklist
                     try:
                         total_bytes = None
@@ -348,7 +384,7 @@ async def run_cycle(cycle: int, target: str, uid: str, wid: str) -> tuple[str | 
         pass
     _p(lambda: "Status chain: " + " → ".join(map(str, chain)))
     _p(lambda: "Final URL   : " + _u(r['url']))
-    return final_one_hop_url, final_one_hop_size, blacklisted_domain
+    return final_one_hop_url, final_one_hop_size, blacklisted_domain, dropped_due_to_blacklist
 
 async def main():
     loop = asyncio.get_running_loop()
@@ -382,12 +418,14 @@ async def main():
                         d.setdefault("one_hop_counts", {})
                         d.setdefault("one_hop_sizes", {})
                         d.setdefault("one_hop_urls", [])
+                        d.setdefault("dropped_clicks", 0)
+                        d.setdefault("clicks_done_total", 0)
                         return d
         except Exception:
             pass
         return {
             "date": _date_key(),
-            "clicks_per_day": int(CLICKS_PER_DAY),
+            "clicks_per_day": int(CLICKS_PER_DAY) * max(1, len(SITES)),
             "sites": [
                 {"TARGET_URL": s["TARGET_URL"], "POP_UID": s["POP_UID"], "POP_WID": s["POP_WID"], "clicks_done": 0}
                 for s in SITES
@@ -396,6 +434,8 @@ async def main():
             "one_hop_counts": {},
             "one_hop_urls": [],
             "one_hop_sizes": {},
+            "dropped_clicks": 0,
+            "clicks_done_total": 0,
         }
 
     state = await _load_or_init_state()
@@ -411,7 +451,7 @@ async def main():
                     cur_key = _date_key()
                     if state.get("date") != cur_key:
                         state["date"] = cur_key
-                        state["clicks_per_day"] = int(CLICKS_PER_DAY)
+                        state["clicks_per_day"] = int(CLICKS_PER_DAY) * max(1, len(SITES))
                         for it in state["sites"]:
                             it["clicks_done"] = 0
                         # reset scheduler on new day
@@ -420,7 +460,8 @@ async def main():
                         state["one_hop_counts"] = {}
                         state["one_hop_sizes"] = {}
                         state["one_hop_urls"] = []
-                        BLACKLIST_DOMAINS.clear()
+                        state["dropped_clicks"] = 0
+                        state["clicks_done_total"] = 0
                     # Build sorted list aggregated by domain (not full URL), include sizes
                     counts = state.get("one_hop_counts", {})
                     sizes = state.get("one_hop_sizes", {})
@@ -438,6 +479,14 @@ async def main():
                         lst.append({"domain": domain, "count": c, "kb_total": kb_total, "kb_avg": kb_avg})
                     state["one_hop_urls"] = lst
                     state["last_updated"] = int(time.time())
+                    try:
+                        successes = int(state.get("clicks_done_total", 0))
+                        dropped = int(state.get("dropped_clicks", 0))
+                        attempts = successes + dropped
+                        pct = (float(dropped) / float(attempts) * 100.0) if attempts > 0 else 0.0
+                        state["dropped_percentage"] = round(pct, 2)
+                    except Exception:
+                        state["dropped_percentage"] = 0.0
                     tmp = _today_path() + ".tmp"
                     # Filter out internal aggregation maps from saved JSON
                     out_state = dict(state)
@@ -460,7 +509,7 @@ async def main():
                 cur_key = _date_key()
                 if state.get("date") != cur_key:
                     state["date"] = cur_key
-                    state["clicks_per_day"] = int(CLICKS_PER_DAY)
+                    state["clicks_per_day"] = int(CLICKS_PER_DAY) * max(1, len(SITES))
                     for it in state["sites"]:
                         it["clicks_done"] = 0
                     state["one_hop_counts"] = {}
@@ -482,7 +531,7 @@ async def main():
                 await asyncio.sleep(delay)
             async with sem:
                 try:
-                    one_hop_url, one_hop_size, blacklisted_domain = await run_cycle(cycle, site["TARGET_URL"], site["POP_UID"], site["POP_WID"])
+                    one_hop_url, one_hop_size, blacklisted_domain, dropped = await run_cycle(cycle, site["TARGET_URL"], site["POP_UID"], site["POP_WID"])
                     success = True
                 except Exception:
                     success = False
@@ -490,19 +539,29 @@ async def main():
                     cycle += 1
             if success:
                 async with state_lock:
-                    state["sites"][idx]["clicks_done"] = int(state["sites"][idx]["clicks_done"]) + 1
                     try:
-                        if one_hop_url:
-                            try:
-                                dom = urlparse(one_hop_url).netloc
-                            except Exception:
-                                dom = one_hop_url
-                            d = state.setdefault("one_hop_counts", {})
-                            d[dom] = int(d.get(dom, 0)) + 1
-                            s = state.setdefault("one_hop_sizes", {})
-                            s[dom] = int(s.get(dom, 0)) + int(one_hop_size or 0)
-                        if blacklisted_domain:
-                            BLACKLIST_DOMAINS.add(blacklisted_domain)
+                        if dropped:
+                            # Drop: do NOT increment click counters or one-hop stats
+                            state["dropped_clicks"] = int(state.get("dropped_clicks", 0)) + 1
+                            if blacklisted_domain and blacklisted_domain not in BLACKLIST_DOMAINS:
+                                BLACKLIST_DOMAINS.add(blacklisted_domain)
+                                _save_blacklist(BLACKLIST_DOMAINS)
+                        else:
+                            # Success: increment counters and aggregate one-hop stats
+                            state["sites"][idx]["clicks_done"] = int(state["sites"][idx]["clicks_done"]) + 1
+                            state["clicks_done_total"] = int(state.get("clicks_done_total", 0)) + 1
+                            if one_hop_url:
+                                try:
+                                    dom = urlparse(one_hop_url).netloc
+                                except Exception:
+                                    dom = one_hop_url
+                                d = state.setdefault("one_hop_counts", {})
+                                d[dom] = int(d.get(dom, 0)) + 1
+                                s = state.setdefault("one_hop_sizes", {})
+                                s[dom] = int(s.get(dom, 0)) + int(one_hop_size or 0)
+                            if blacklisted_domain and blacklisted_domain not in BLACKLIST_DOMAINS:
+                                BLACKLIST_DOMAINS.add(blacklisted_domain)
+                                _save_blacklist(BLACKLIST_DOMAINS)
                     except Exception:
                         pass
             # small sleep to avoid tight loop if multiple overdue
