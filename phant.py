@@ -384,6 +384,10 @@ async def run_cycle(cycle: int, target: str, uid: str, wid: str) -> tuple[str | 
         pass
     _p(lambda: "Status chain: " + " → ".join(map(str, chain)))
     _p(lambda: "Final URL   : " + _u(r['url']))
+    try:
+        await b.aclose()
+    except Exception:
+        pass
     return final_one_hop_url, final_one_hop_size, blacklisted_domain, dropped_due_to_blacklist
 
 async def main():
@@ -407,6 +411,12 @@ async def main():
 
     def _today_path() -> str:
         return os.path.join(os.path.dirname(__file__), f"{_date_key()}.json")
+
+    def _canonical_sites() -> list[dict]:
+        return [
+            {"TARGET_URL": s["TARGET_URL"], "POP_UID": s["POP_UID"], "POP_WID": s["POP_WID"], "clicks_done": 0}
+            for s in SITES
+        ]
 
     async def _load_or_init_state() -> dict:
         path = _today_path()
@@ -439,6 +449,14 @@ async def main():
         }
 
     state = await _load_or_init_state()
+    # Ensure state sites align with current SITES
+    try:
+        if not isinstance(state.get("sites"), list) or len(state["sites"]) != len(SITES):
+            state["sites"] = _canonical_sites()
+            state["clicks_per_day"] = int(CLICKS_PER_DAY) * max(1, len(SITES))
+    except Exception:
+        state["sites"] = _canonical_sites()
+        state["clicks_per_day"] = int(CLICKS_PER_DAY) * max(1, len(SITES))
 
     def _midnight_ts(t: float | None = None) -> float:
         lt = time.localtime(t or time.time())
@@ -452,8 +470,11 @@ async def main():
                     if state.get("date") != cur_key:
                         state["date"] = cur_key
                         state["clicks_per_day"] = int(CLICKS_PER_DAY) * max(1, len(SITES))
-                        for it in state["sites"]:
-                            it["clicks_done"] = 0
+                        if not isinstance(state.get("sites"), list) or len(state["sites"]) != len(SITES):
+                            state["sites"] = _canonical_sites()
+                        else:
+                            for it in state["sites"]:
+                                it["clicks_done"] = 0
                         # reset scheduler on new day
                         for i in range(len(site_seq)):
                             site_seq[i] = 0
@@ -510,8 +531,11 @@ async def main():
                 if state.get("date") != cur_key:
                     state["date"] = cur_key
                     state["clicks_per_day"] = int(CLICKS_PER_DAY) * max(1, len(SITES))
-                    for it in state["sites"]:
-                        it["clicks_done"] = 0
+                    if not isinstance(state.get("sites"), list) or len(state["sites"]) != len(SITES):
+                        state["sites"] = _canonical_sites()
+                    else:
+                        for it in state["sites"]:
+                            it["clicks_done"] = 0
                     state["one_hop_counts"] = {}
                     state["one_hop_sizes"] = {}
                     state["one_hop_urls"] = []

@@ -15,6 +15,40 @@ class TlsBrowser:
             random_tls_extension_order=True,
         )
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.aclose()
+
+    def close(self) -> None:
+        try:
+            close = getattr(self.session, 'close', None)
+            if callable(close):
+                close()
+        except Exception:
+            pass
+        try:
+            jar = getattr(self.session, 'cookies', None)
+            clear = getattr(jar, 'clear', None)
+            if callable(clear):
+                clear()
+        except Exception:
+            pass
+
+    async def aclose(self) -> None:
+        try:
+            await asyncio.to_thread(self.close)
+        except Exception:
+            pass
+
+    def __del__(self):
+        # Best-effort close to avoid leaked native resources if user forgets
+        try:
+            self.close()
+        except Exception:
+            pass
+
     async def _do(self, method: str, url: str, headers: dict, timeout: int, follow: bool) -> dict:
         h = dict(headers)
         h['User-Agent'] = self.user_agent
@@ -74,6 +108,13 @@ class TlsBrowser:
                     aborted_at_cap = isinstance(content, (bytes, bytearray)) and len(content) > MAX_BYTES
                 except Exception:
                     aborted_at_cap = False
+                # Close response to free connection/resources
+                try:
+                    close = getattr(resp, 'close', None)
+                    if callable(close):
+                        close()
+                except Exception:
+                    pass
         except Exception:
             # Ultimate fallback if streaming kw not accepted
             resp = await asyncio.to_thread(getattr(self.session, method), url, **kwargs)
@@ -89,14 +130,18 @@ class TlsBrowser:
                 aborted_at_cap = isinstance(content, (bytes, bytearray)) and len(content) > MAX_BYTES
             except Exception:
                 aborted_at_cap = False
+            # Close response to free connection/resources
+            try:
+                close = getattr(resp, 'close', None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
         # Derive text cheaply from capped body
         try:
-            text = str(getattr(resp, 'text'))
+            text = body.decode('utf-8', errors='ignore')
         except Exception:
-            try:
-                text = body.decode('utf-8', errors='ignore')
-            except Exception:
-                text = ''
+            text = ''
         hdrs = {}
         set_cookie_values: list[str] = []
         try:
