@@ -226,10 +226,16 @@ def _apply_cpm_weights_from_report(rep: dict) -> bool:
         if n <= 1:
             _COUNTRY_WEIGHTS[:] = [1.0]
             return True
-        rem = max(0.0, 1.0 - 0.95)
-        per_other = rem / float(n - 1)
+        # Top 3 receive 95% evenly, others share 5%
+        k = min(3, len(valid))
+        top_k_names = {name for name, _ in valid[:k]}
+        top_share = 0.95
+        other_share = 1.0 - top_share
+        per_top = top_share / float(k)
+        others_count = max(0, n - k)
+        per_other = (other_share / float(others_count)) if others_count > 0 else 0.0
         for i, name in enumerate(COUNTRIES):
-            _COUNTRY_WEIGHTS[i] = 0.95 if name == top_name else per_other
+            _COUNTRY_WEIGHTS[i] = per_top if name in top_k_names else per_other
         return True
     except Exception:
         return False
