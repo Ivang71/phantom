@@ -3,7 +3,6 @@ import concurrent.futures as _futures
 from urllib.parse import urlparse
 from core.config import LOG_DIR, NUMBER_OF_WORKERS, VERBOSE, SILENT, MAX_THREADS
 from core.blacklist import BLACKLIST_DOMAINS, save_blacklist
-from core.cpm import cpm_fetch_and_update, cpm_fetcher
 from core.engine import run_cycle
 
 
@@ -231,9 +230,6 @@ async def main():
                         pass
             await asyncio.sleep(0.5)
 
-    _p("[INIT] Starting initial CPM fetch")
-    await cpm_fetch_and_update(initial=True, logger=_p)
-    _p("[INIT] CPM fetch complete")
 
     lanes_per_site = max(1, NUMBER_OF_WORKERS // max(1, len(sites)))
     tasks = [
@@ -242,7 +238,7 @@ async def main():
         for _ in range(lanes_per_site)
     ]
     rep = asyncio.create_task(daily_reporter())
-    cpm = asyncio.create_task(cpm_fetcher(_p))
+    # CPM removed
     stop_event = asyncio.Event()
 
     def _signal_stop() -> None:
@@ -259,7 +255,7 @@ async def main():
         pass
 
     await stop_event.wait()
-    for t in tasks + [rep, cpm]:
+    for t in tasks + [rep]:
         try:
             t.cancel()
         except Exception:

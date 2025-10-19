@@ -7,7 +7,15 @@ from browser.ua import generate_user_agent
 from route.popcash import build_go, next_url_from, extract_probe
 from net.geo import locale_from_country, accept_language_header_from_locale
 from core.config import LOG_HEADERS, LOG_COOKIES, HTTP_TIMEOUT, VERBOSE
-from core.cpm import COUNTRY_WEIGHTS, NAME_TO_CC, COUNTRIES
+NAME_TO_CC = {
+    "Australia":"AU", "Canada":"CA", "Czechia":"CZ", "Denmark":"DK", "Finland":"FI", "France":"FR", "Germany":"DE",
+    "Italy":"IT", "Norway":"NO", "Spain":"ES", "Sweden":"SE", "Switzerland":"CH", "UnitedKingdom":"GB",
+}
+COUNTRIES = [
+    "Australia", "Canada", "Czechia", "Denmark", "Finland",
+    "France", "Germany", "Italy", "Norway",
+    "Spain", "Sweden", "Switzerland", "UnitedKingdom",
+]
 from core.blacklist import BLACKLIST_DOMAINS
 
 
@@ -17,10 +25,7 @@ def _gen_session_token(n: int = 16) -> str:
 
 
 def _pick_country() -> str:
-    try:
-        return random.choices(COUNTRIES, weights=list(COUNTRY_WEIGHTS), k=1)[0]
-    except Exception:
-        return random.choice(COUNTRIES)
+    return random.choice(COUNTRIES)
 
 
 async def run_cycle(cycle: int, target: str, uid: str, wid: str, logger) -> tuple[str | None, int, str | None, bool]:
