@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 import os, time, random, asyncio, contextlib, json
+import signal
+import urllib.request as _urlreq
+import urllib.error as _urlerr
 try:
     from dotenv import load_dotenv, find_dotenv  # type: ignore
     from pathlib import Path
@@ -48,9 +51,15 @@ from browser.ua import generate_user_agent
 from route.popcash import build_go, next_url_from, extract_probe
 from net.geo import locale_from_country, accept_language_header_from_locale
 
-# Shared blacklist across all workers (domains exceeding size limit)
-# Persisted across restarts via JSON file in the project directory
-BLACKLIST_FILE = os.path.join(os.path.dirname(__file__), "blacklist.json")
+# Shared paths
+LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+try:
+    os.makedirs(LOG_DIR, exist_ok=True)
+except Exception:
+    pass
+
+# Shared blacklist across all workers
+BLACKLIST_FILE = os.path.join(LOG_DIR, "blacklist.json")
 
 def _load_blacklist() -> set[str]:
     try:
@@ -144,9 +153,200 @@ COUNTRIES = [
 ]
 
 NAME_TO_CC = {
-    "Canada":"CA", "Czechia":"CZ", "Denmark":"DK", "Finland":"FI", "France":"FR", "Germany":"DE",
+    "Australia":"AU", "Canada":"CA", "Czechia":"CZ", "Denmark":"DK", "Finland":"FI", "France":"FR", "Germany":"DE",
     "Italy":"IT", "Norway":"NO", "Spain":"ES", "Sweden":"SE", "Switzerland":"CH", "UnitedKingdom":"GB",
 }
+
+CC_TO_NAME = {v: k for k, v in NAME_TO_CC.items()}
+
+_UNIFORM_WEIGHT = 1.0 / max(1, len(COUNTRIES))
+_COUNTRY_WEIGHTS: list[float] = [_UNIFORM_WEIGHT for _ in COUNTRIES]
+_CURRENT_TOP_COUNTRY: str | None = None
+
+def _pick_country() -> str:
+    try:
+        return random.choices(COUNTRIES, weights=list(_COUNTRY_WEIGHTS), k=1)[0]
+    except Exception:
+        return random.choice(COUNTRIES)
+
+def _date_iso(ts: float | None = None) -> str:
+    t = time.localtime(ts or time.time())
+    return f"{t.tm_year:04d}-{t.tm_mon:02d}-{t.tm_mday:02d}"
+
+def _yesterday_iso() -> str:
+    return _date_iso((time.time() - 86400))
+
+def _cpm_path(date_iso: str) -> str:
+    return os.path.join(LOG_DIR, f"cpm_{date_iso}.json")
+
+def _dump_json(path: str, obj: object) -> None:
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+def _set_uniform_weights() -> None:
+    w = 1.0 / max(1, len(COUNTRIES))
+    for i in range(len(_COUNTRY_WEIGHTS)):
+        _COUNTRY_WEIGHTS[i] = w
+
+def _apply_cpm_weights_from_report(rep: dict) -> bool:
+    try:
+        rows = rep.get("report")
+        if not isinstance(rows, list) or not rows:
+            return False
+        valid = []
+        for it in rows:
+            cc = str(it.get("cc") or "").upper()
+            rate_str = it.get("rate")
+            try:
+                rate = float(rate_str)
+            except Exception:
+                continue
+            name = CC_TO_NAME.get(cc)
+            if name in COUNTRIES:
+                valid.append((name, rate))
+        if not valid:
+            return False
+        valid.sort(key=lambda x: (-x[1], x[0]))
+        top_name, top_rate = valid[0][0], valid[0][1]
+        try:
+            global _CURRENT_TOP_COUNTRY
+            if _CURRENT_TOP_COUNTRY != top_name:
+                _CURRENT_TOP_COUNTRY = top_name
+                cc = NAME_TO_CC.get(top_name, "")
+                _p(lambda: f"[CPM] Top country set: {top_name} ({cc}) rate={top_rate}")
+        except Exception:
+            pass
+        n = len(COUNTRIES)
+        if n <= 1:
+            _COUNTRY_WEIGHTS[:] = [1.0]
+            return True
+        rem = max(0.0, 1.0 - 0.95)
+        per_other = rem / float(n - 1)
+        for i, name in enumerate(COUNTRIES):
+            _COUNTRY_WEIGHTS[i] = 0.95 if name == top_name else per_other
+        return True
+    except Exception:
+        return False
+
+def _fetch_cpm_sync(for_date_iso: str) -> tuple[dict | None, str | None]:
+    url = "https://members.popcash.net/api/reports/publisher"
+    website_id = os.environ.get("POPCASH_WEBSITE") or os.environ.get("POPCASH_WEBSITE_ID")
+    csrf = os.environ.get("POPCASH_CSRF")
+    cookie = os.environ.get("POPCASH_COOKIE")
+    if not website_id or not csrf or not cookie:
+        try:
+            missing = []
+            if not website_id:
+                missing.append("POPCASH_WEBSITE")
+            if not csrf:
+                missing.append("POPCASH_CSRF")
+            if not cookie:
+                missing.append("POPCASH_COOKIE")
+            _p(lambda: f"[CPM] Missing env: {', '.join(missing)}")
+        except Exception:
+            pass
+        return None, json.dumps({"error":"missing_env","missing":{
+            "POPCASH_WEBSITE": bool(website_id),
+            "POPCASH_CSRF": bool(csrf),
+            "POPCASH_COOKIE": bool(cookie),
+        }})
+    try:
+        body = json.dumps({
+            "startDate": for_date_iso,
+            "endDate": for_date_iso,
+            "reportType": "1",
+            "website": int(website_id),
+            "csrf": csrf,
+        }).encode("utf-8")
+    except Exception:
+        return None, None
+    req = _urlreq.Request(url, data=body, method="POST")
+    req.add_header("accept", "application/json, text/plain, */*")
+    req.add_header("content-type", "application/json")
+    req.add_header("accept-language", "en-US,en;q=0.9")
+    req.add_header("cache-control", "no-cache")
+    req.add_header("pragma", "no-cache")
+    req.add_header("origin", "https://members.popcash.net")
+    req.add_header("referer", "https://members.popcash.net/reports/publisher")
+    req.add_header("x-requested-with", "XMLHttpRequest")
+    ua = os.environ.get("POPCASH_UA") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+    req.add_header("user-agent", ua)
+    req.add_header("cookie", cookie)
+    try:
+        with _urlreq.urlopen(req, timeout=45) as resp:
+            raw = resp.read()
+            try:
+                code = resp.getcode()
+                _p(lambda: f"[CPM] HTTP {code} len={len(raw)}")
+            except Exception:
+                pass
+    except _urlerr.HTTPError as e:
+        try:
+            raw_err = e.read()
+        except Exception:
+            raw_err = None
+        _p(lambda: f"[CPM] HTTPError {getattr(e, 'code', '?')} during fetch")
+        return None, (raw_err.decode("utf-8", errors="ignore") if raw_err else None)
+    except (_urlerr.URLError, TimeoutError, Exception):
+        return None, None
+    try:
+        return json.loads(raw.decode("utf-8", errors="ignore")), raw.decode("utf-8", errors="ignore")
+    except Exception:
+        return None, raw.decode("utf-8", errors="ignore")
+
+async def _cpm_fetch_and_update(initial: bool) -> None:
+    today = _date_iso()
+    _p(lambda: f"[CPM] Fetching report for {today}")
+    rep, raw = await asyncio.to_thread(_fetch_cpm_sync, today)
+    try:
+        if raw is not None:
+            try:
+                _dump_json(_cpm_path(today), json.loads(raw))
+            except Exception:
+                _dump_json(_cpm_path(today), {"_raw": raw})
+        else:
+            _dump_json(_cpm_path(today), {"error":"no_response"})
+        _p(lambda: f"[CPM] Saved {os.path.basename(_cpm_path(today))}")
+    except Exception:
+        pass
+    if not rep or not _apply_cpm_weights_from_report(rep):
+        if initial:
+            y = _yesterday_iso()
+            _p(lambda: f"[CPM] No data for {today}; trying fallback {y}")
+            rep_y, raw_y = await asyncio.to_thread(_fetch_cpm_sync, y)
+            try:
+                if raw_y is not None:
+                    try:
+                        _dump_json(_cpm_path(y), json.loads(raw_y))
+                    except Exception:
+                        _dump_json(_cpm_path(y), {"_raw": raw_y})
+                else:
+                    _dump_json(_cpm_path(y), {"error":"no_response"})
+                _p(lambda: f"[CPM] Saved {os.path.basename(_cpm_path(y))}")
+            except Exception:
+                pass
+            if rep_y and _apply_cpm_weights_from_report(rep_y):
+                _p(lambda: f"[CPM] Fallback successful; weights applied")
+                return
+        _set_uniform_weights()
+        _p("[CPM] Using uniform country weights")
+        return
+    # We already saved raw; weights applied now
+
+async def cpm_fetcher() -> None:
+    while True:
+        try:
+            await asyncio.sleep(3600)
+            _p(lambda: f"[CPM] Hourly refresh for {_date_iso()}")
+            await _cpm_fetch_and_update(initial=False)
+        except Exception:
+            await asyncio.sleep(3600)
 
 def _gen_session_token(n: int = 16) -> str:
     alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -159,7 +359,7 @@ async def run_cycle(cycle: int, target: str, uid: str, wid: str) -> tuple[str | 
     pport = os.environ.get("PROXY_PORT")
     ua, ua_meta = generate_user_agent(cycle)
 
-    country = random.choice(COUNTRIES)
+    country = _pick_country()
     cc = NAME_TO_CC.get(country, "US")
     session_token = _gen_session_token()
     pwd = f"{pp}_country-{country}_session-{session_token}" if pp else None
@@ -413,7 +613,7 @@ async def main():
         return f"{t.tm_mon}_{t.tm_mday}_{t.tm_year}"
 
     def _today_path() -> str:
-        return os.path.join(os.path.dirname(__file__), f"{_date_key()}.json")
+        return os.path.join(LOG_DIR, f"{_date_key()}.json")
 
     def _canonical_sites() -> list[dict]:
         return [
@@ -594,6 +794,11 @@ async def main():
             # small sleep to avoid tight loop if multiple overdue
             await asyncio.sleep(0.5)
 
+    # Initial CPM fetch before launching workers
+    _p("[INIT] Starting initial CPM fetch")
+    await _cpm_fetch_and_update(initial=True)
+    _p("[INIT] CPM fetch complete")
+
     # Spawn multiple lanes per site to spread load across workers
     lanes_per_site = max(1, NUMBER_OF_WORKERS // max(1, len(SITES)))
     tasks = [
@@ -602,8 +807,30 @@ async def main():
         for _ in range(lanes_per_site)
     ]
     rep = asyncio.create_task(daily_reporter())
-    with contextlib.suppress(asyncio.CancelledError):
-        await asyncio.gather(*tasks, rep)
+    cpm = asyncio.create_task(cpm_fetcher())
+    stop_event = asyncio.Event()
+
+    def _signal_stop() -> None:
+        try:
+            _p("[EXIT] Signal received, shutting down...")
+        except Exception:
+            pass
+        stop_event.set()
+
+    try:
+        asyncio.get_running_loop().add_signal_handler(signal.SIGINT, _signal_stop)
+        asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, _signal_stop)
+    except Exception:
+        pass
+
+    await stop_event.wait()
+    for t in tasks + [rep, cpm]:
+        try:
+            t.cancel()
+        except Exception:
+            pass
+    with contextlib.suppress(Exception):
+        await asyncio.gather(*tasks, rep, cpm, return_exceptions=True)
 
 if __name__ == '__main__':
     asyncio.run(main())
