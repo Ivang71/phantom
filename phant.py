@@ -228,12 +228,21 @@ def _apply_cpm_weights_from_report(rep: dict) -> bool:
             return True
         # Top 3 receive 95% evenly, others share 5%
         k = min(3, len(valid))
-        top_k_names = {name for name, _ in valid[:k]}
+        top_k = valid[:k]
+        top_k_names = {name for name, _ in top_k}
         top_share = 0.95
         other_share = 1.0 - top_share
         per_top = top_share / float(k)
         others_count = max(0, n - k)
         per_other = (other_share / float(others_count)) if others_count > 0 else 0.0
+        try:
+            desc = []
+            for name, rate in top_k:
+                cc = NAME_TO_CC.get(name, "")
+                desc.append(f"{name} ({cc}) rate={rate}")
+            _p(lambda: f"[CPM] Top {k}: "+ ", ".join(desc) + f"; per_top={per_top:.4f} per_other={per_other:.4f}")
+        except Exception:
+            pass
         for i, name in enumerate(COUNTRIES):
             _COUNTRY_WEIGHTS[i] = per_top if name in top_k_names else per_other
         return True
