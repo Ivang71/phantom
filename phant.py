@@ -138,11 +138,14 @@ def _u(s: str) -> str:
     return s if len(s) <= 70 else f"{s[:67]}..."
 
 COUNTRIES = [
-    "France", "Germany", "Italy", "Spain", "Sweden",  "UnitedKingdom",
+    "Australia", "Canada", "Czechia", "Denmark", "Finland",
+    "France", "Germany", "Italy", "Norway",
+    "Spain", "Sweden", "Switzerland", "UnitedKingdom",
 ]
 
 NAME_TO_CC = {
-    "France":"FR", "Germany":"DE", "Italy":"IT", "Spain":"ES", "Sweden":"SE", "UnitedKingdom":"GB",
+    "Canada":"CA", "Czechia":"CZ", "Denmark":"DK", "Finland":"FI", "France":"FR", "Germany":"DE",
+    "Italy":"IT", "Norway":"NO", "Spain":"ES", "Sweden":"SE", "Switzerland":"CH", "UnitedKingdom":"GB",
 }
 
 def _gen_session_token(n: int = 16) -> str:
